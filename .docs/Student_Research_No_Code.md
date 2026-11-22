@@ -2,8 +2,9 @@
 
 ## Start your workspace
 
-**New to CoChem? [Start with the quick guide](GET_STARTED.md).** It explains
-opening the dashboard, ORCA/CFOUR access and the first calculation.
+**New to CoChem? [Follow the step-by-step student guide](GET_STARTED.md#student-personal-project).**
+It starts with your GitHub account and private **`CoChem-[target molecule name]`**
+project, then explains opening CoChem, lab access and your first saved calculation.
 
 This page is a reference: open only the section you need. You supply your own
 starting structures and scientific files. CoChem-BASE prepares its analysis
@@ -17,16 +18,21 @@ components and brings their results into the same interface.
 
 ## Find guidance while you work
 
-The sidebar follows the research task: **Start here → Your files → Calculations
-→ Results**. **Spectra and properties** and **Periodic structures** provide
-specialized tools. Under **Calculations**, the tabs are **Starting structure**,
-**Method and settings**, **TOPOS**, **TORQ** and **Monomer constraints**.
+Use the four buttons at the top: **1 · Setup → 2 · Add your molecule →
+3 · Run assigned calculation → 4 · Read and save results**. Their pages are
+titled **Start here**, **Your files**, **Calculations** and **Results**.
+Under **Calculations**, begin with **Starting structure** and **Method and
+settings**. Open **Advanced: other calculation tools** for **Other structures
+and energies**, **Distance scans and bonding**, or **Monomer constraints**.
+**More scientific tools** contains **Spectra and properties** and **Periodic
+structures** when your assignment calls for them.
 
-Short instructions remain beside controls. Open a named **Explain…** section
-for the meaning, examples and limitations of a setting. **Scientific terms**
-provides a search box for definitions such as charge, Hessian and free energy.
-Looking up a term does not change the calculation draft. You can return to the
-same settings and continue.
+**Help search** is available at the top. Try a word or question such as
+“chirality” or “what does charge mean?”. The answer starts with a short
+explanation; open **Teach me more: why, when, where and how** for more detail.
+Nearby **Help · …** buttons explain the current task, and named **Explain…**
+sections explain individual settings. Reading help does not change your
+calculation draft.
 
 ## Upload your structures
 
@@ -40,9 +46,11 @@ same settings and continue.
    or several files. You can supply a monomer, a complete complex or several
    starting arrangements. You do not need an instructor-provided structure.
 3. Select the file and its **Structure / frame**, then choose **Use selected
-   starting geometry**. Check the displayed molecule and **Input type**. BASE
-   keeps the original separately from any working geometry. If you uploaded
-   the wrong file, choose **Remove from list**; use **Undo remove** or
+   starting geometry**, then **Continue to calculation settings**. Open
+   **Calculations → Starting structure** to check the displayed molecule and
+   **Input type**. BASE keeps the original separately from any working geometry.
+   If you uploaded the wrong file, return to **Your files** and choose
+   **Remove from list**; use **Undo remove** or
    **Show removed inputs → Restore selected input** to bring it back.
 4. In **Calculations → Starting structure**, set **Structure charge** and
    **Structure multiplicity** for the molecule. XYZ does not reliably store these
@@ -95,11 +103,11 @@ BASE retains the untouched original alongside its validated interpretation.
 | Canonical trajectory HDF5 or numerical NPZ/HDF5 | Bounded dataset previews, recorded values and declared units/provenance. External file references and pickled arrays are rejected. |
 | PAW UPF pseudopotential | Untouched potential, element, header and hash; the selected calculation must separately pass its native scientific checks. |
 
-1. Choose **Your files** on the left.
+1. Choose **2 · Add your molecule** to open **Your files**.
 2. Leave **File contents → Detect from file** for ordinary structures,
    or select the appropriate type for a Hessian, spectroscopy output or data
    archive. Choose **Upload scientific inputs** and select your files.
-3. Read the validation message. Open **File details and provenance** to
+3. Wait for validation to finish and read its message. Open **File details and provenance** to
    inspect the retained-input table and source record. A rejected file stays
    out of calculation choices; valid earlier uploads remain available. Keep the
    error for your instructor.
@@ -252,7 +260,8 @@ methods that require the unavailable engine cannot be run.
 <details>
 <summary><strong>Provide R2 references, a starting Hessian or an active space</strong></summary>
 
-In **Calculations → Monomer constraints**, open **Provide R2 monomer references**.
+In **Calculations → Advanced: other calculation tools → Monomer constraints**,
+open **Provide R2 monomer references**.
 **Upload R2 references** accepts a ZIP containing
 the reference manifest, original monomer geometries, original canonical
 CCSD(T) outputs for both basis sizes, and any referenced geometry-optimization
@@ -289,20 +298,22 @@ and result-retrieval buttons; you do not upload engine binaries or run code.
 <details>
 <summary><strong>Choose analyses and interpret tables, curves and populations</strong></summary>
 
-In **Calculations → TOPOS**, use **Structures and energies** to optimize a
+In **Calculations → Advanced: other calculation tools → Other structures and
+energies**, use **Structures and energies** to optimize a
 starting geometry or search for isomer/association candidates. Select the enabled
 **Calculation**, the instructor's **Method**, and any required monomer states,
 then choose **Start TOPOS calculation**. It follows the selected
 calculation environment through BASE.
 
-In **Calculations → TORQ**, open **Distance scan**
+In **Calculations → Advanced: other calculation tools → Distance scans and
+bonding**, open **Distance scan**
 and choose **Start distance scan** when it is available. Its current rigid scan
 moves one of two fragments along their initial mass-center separation. Supply
 the fragment groups, method/basis, separation range and number of evaluated
 points. A rigid scan is distinct from optimized scan points or a multidimensional
 potential surface.
 
-In the **TORQ** tab, **Bond analysis → Calculate Löwdin Wiberg indices** uses
+In the same tool, **Bond analysis → Calculate Löwdin Wiberg indices** uses
 a supported electronic calculation
 to produce bond-index tables and a bond diagram in the Löwdin orthogonalized
 atomic-orbital basis. It is distinct from natural atomic orbital Wiberg indices
@@ -358,8 +369,11 @@ convergence and correction conventions are appropriate for that comparison.
   occupancies, bond indices or diagrams.
 
 Save the original starting files, final structures, calculation bundle and
-report. BASE's managed runtime/results directories are separate from your
-personal project checkout. To save a downloaded report through the repository,
+report to your own computer or course-approved storage. BASE's managed
+runtime/results directories and the Student input inbox are separate from your
+personal project checkout. **Commit** or **Sync Changes** does not back them up;
+keep your original uploads and use **Download calculation bundle**. To save a
+downloaded report through the repository,
 drag its course-approved files into your project's **Explorer** folder in
 VS Code, or use GitHub **Add file → Upload files**. Use VS Code **Source Control**
 to commit the course files you intend to submit: select the files, enter a
@@ -394,7 +408,8 @@ large files rather than committing an entire runtime or binary archive.
    controls as directed. Do not install from another repository manually.
 
 New permissions require a **new Codespace**, after your instructor corrects
-access and you have synchronized the course files you wish to keep. Approve the
+access and you have downloaded your original inputs and calculation bundles,
+and saved your course report. Approve the
 project permissions GitHub shows when creating it. Rebuilding an existing
 Codespace does not refresh those permissions. An ordinary module bug fix that
 uses existing permissions does not require this step.

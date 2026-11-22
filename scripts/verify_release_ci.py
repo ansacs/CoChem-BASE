@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import runpy
 import subprocess
 import sys
 import tarfile
@@ -19,6 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HOSTED_TESTS = (
+    "tests/base/test_dependency_warning_routing.py",
     "tests/test_cochem_bench_cv.py",
     "tests/base/test_qe_paw_input_provisioning.py",
     "tests/base/test_native_grid_execution.py",
@@ -33,11 +35,17 @@ HOSTED_TESTS = (
     "tests/base/test_chain_integrity.py",
     "tests/calc/test_nuclide_ingress_handoff.py",
     "tests/ui/test_optional_licensed_engines.py",
+    "tests/ui/test_molecule_viewer.py",
+    "tests/gui/test_touch_3d_viewer.py",
     "tests/ui/test_research_panel_clarity.py",
     "tests/ui/test_disclosure.py",
     "tests/ui/test_learning_guidance.py",
+    "tests/ui/test_learning_search.py",
+    "tests/ui/test_initial_widget_state.py",
+    "tests/ui/test_active_work_cancellation.py",
     "tests/ui/test_scientific_error_guidance.py",
     "tests/ui/test_workspace_guidance.py",
+    "tests/ui/test_beginner_workspace_layout.py",
     "tests/calc/test_cfour_execution_contract.py",
     "tests/base/test_cfour_provisioning.py",
     "tests/base/test_context_compression_contract.py",
@@ -57,6 +65,9 @@ HOSTED_TESTS = (
     "tests/base/test_workspace_facade.py",
     "tests/base/test_hardware_observation_authority.py",
     "tests/base/test_course_project_access.py",
+    "tests/base/test_student_colab_validation.py",
+    "tests/base/test_course_project_binding.py",
+    "tests/base/test_course_access_inbox.py",
     "tests/ui/test_course_access_widget.py",
     "tests/base/test_module_handoff_contract.py",
     "tests/base/test_legacy_scientific_retirement.py",
@@ -71,14 +82,24 @@ HOSTED_TESTS = (
     "tests/base/test_legacy_measured_data_admission.py",
     "tests/torq/test_retired_legacy_potential_admission.py",
     "tests/base/test_module_installer.py",
+    "tests/base/test_pinned_pip_runtime.py",
+    "tests/base/test_pip_command_context.py",
     "tests/base/test_module_execution.py",
     "tests/base/test_module_adapter_topos.py",
     "tests/base/test_module_adapter_torq.py",
+    "tests/base/test_module_package_ownership.py",
     "tests/base/test_student_actions_contract.py",
+    "tests/base/test_student_actions_admission.py",
+    "tests/base/test_student_actions_admission_cache.py",
+    "tests/base/test_student_actions_admission_counts.py",
+    "tests/base/test_student_actions_admission_git_readonly.py",
+    "tests/base/test_student_actions_barrier.py",
+    "tests/ui/test_student_actions_admission_ui.py",
     "tests/base/test_student_hpc_contract.py",
     "tests/base/test_student_setup.py",
     "tests/base/test_student_research_contract.py",
     "tests/base/test_student_reports.py",
+    "tests/base/test_local_calculations.py",
     "tests/base/test_scientific_inputs.py",
     "tests/base/test_student_ingestion.py",
     "tests/base/test_student_data_inputs.py",
@@ -105,6 +126,7 @@ HOSTED_TESTS = (
     "tests/calc/test_calculation_service_integrity.py",
     "tests/calc/test_scientific_policy.py",
     "tests/calc/test_xtb_cli_execution.py",
+    "tests/calc/test_local_publication.py",
     "tests/calc/test_orca_input_tight_constraints.py",
     "tests/ui/test_gui_spectroscopy_inspector.py",
     "tests/ui/test_hessian_inspector.py",
@@ -174,12 +196,19 @@ def wheel(output: Path, *, expected_revision: str | None = None) -> dict:
     if len(wheels) != 1:
         raise RuntimeError("Expected exactly one freshly built BASE wheel")
     venv = output / "wheel-env"
-    _run([sys.executable, "-m", "venv", str(venv)], output, environment, output / "venv.log", 120)
+    _run([sys.executable, "-B", "-m", "venv", "--without-pip", str(venv)], output, environment, output / "venv.log", 120)
     binary_dir = venv / ("Scripts" if os.name == "nt" else "bin")
     python = binary_dir / ("python.exe" if os.name == "nt" else "python")
     command = binary_dir / ("cochem-cli.exe" if os.name == "nt" else "cochem-cli")
-    _run([str(python), "-m", "pip", "install", "--disable-pip-version-check", str(wheels[0])],
-         output, environment, output / "wheel-install.log")
+    # Direct script execution uses this exact source-local helper, not an
+    # installed/foreign scripts package. The caller retains its real log streams.
+    pip_command = runpy.run_path(str(ROOT / "scripts/manage_modules.py"),
+                                run_name="reviewed_release_pip")["_pip_command"]
+    with pip_command(python, [], env=environment, timeout=120, bootstrap=True) as (argv, prepared, remaining):
+        _run(argv, output, prepared, output / "pip-bootstrap.log", remaining)
+    with pip_command(python, ["install", "--disable-pip-version-check", str(wheels[0])],
+                     env=environment, timeout=1800) as (argv, prepared, remaining):
+        _run(argv, output, prepared, output / "wheel-install.log", remaining)
     _run([str(python), "-m", "pip", "check"], output, environment, output / "pip-check.log", 60)
     for label, argv in (
         ("console-version", [str(command), "--version"]),

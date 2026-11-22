@@ -1,33 +1,60 @@
-# From an XYZ file to an instructor handoff
+# CoChem Student CURE Workflows & Pipeline 5.0.0 Handoff (`student/`)
 
-In your public CoChem-BASE fork, open **Actions** and enable workflows if GitHub asks. Open **Student conformers (CREST, MACE, CPU PySCF)** and select **Run workflow** on the default branch. Leave **ethanol.xyz** selected for the first exercise. To study your own molecule, upload a single ASCII XYZ file to `examples/student_inputs/` on the default branch, then enter its filename in the workflow. Use only structures approved for public sharing. A public fork exposes committed molecules and workflow logs.
+CoChem supports **both** private/template research repositories (such as CHEM 490
+ORCA 6.1.1 / CFOUR / SPFIT / SPCAT projects) and **public-fork CURE workflows**
+(`XYZ -> CREST 3.0.2 -> MLFF -> CPU PySCF -> cochem.student-handoff/2`) developed
+for **Tennessee Tech University** courses (`CHEM312`, `CHEM490`, `CHEM410`, `CHEM411`).
 
-Each input contains 2–16 H, C, N or O atoms, coordinates in angstrom, and one neutral, closed-shell molecule. Supply a conventional XYZ atom count, comment line and one element and three coordinates per atom. Use letters, digits, hyphens or underscores in the filename. The workflow uses a GitHub-hosted CPU. Students need a GitHub account with write access to their fork and Actions enabled.
+## 1. Dashboard-First Start (Recommended)
 
-## Read the result
+1. Copy or fork `ProfJJK-CoChem/CoChem-BASE` into your own GitHub account.
+2. Open a GitHub Codespace on `main` and wait for port **8866 (`CoChem Voilà dashboard`)**
+   to launch automatically with `PySCF`, `xTB`, `CREST`, `TOPOS`, and `TORQ`.
+3. Upload your `.xyz` structure, verify total **charge** and **spin multiplicity**,
+   run your assigned calculation, and download your verified ZIP bundle.
 
-Use the [ethanol lab and worked comparison](ETHANOL_LAB.md) to calculate relative energies and interpret a bond-length change.
+## 2. Manual GitHub Actions Fallback (`workflow_dispatch` Only)
 
-CREST uses the external xTB 6.7.1 binary and omits genetic crossing in this small-molecule classroom profile. The native log records that choice.
+When working from a public fork without a live Codespace, run one of the manual
+course workflows from the **Actions** tab (all course workflows are strictly
+`workflow_dispatch`-only — zero automatic `push:` triggers and zero `schedule:` crons):
 
-CREST 3.0.2 performs a bounded GFN2-xTB quick conformer search. The workflow retains the native ensemble, every separate candidate XYZ and the engine log. MACE-OFF24 medium evaluates energies and forces on those geometries using its pinned CPU checkpoint. It ranks by MACE single-point energy and sends the lowest candidate to CPU PySCF for an RHF/STO-3G geometry optimization with geomeTRIC. This small-basis result is a starting structure for further research. A local minimum requires a separate vibrational check. A quick search can miss conformers. The 32-frame limit fails visibly if more candidates are found.
+| Workflow | Purpose | Course Track |
+| --- | --- | --- |
+| `.github/workflows/student_conformers.yml` | Generalized `XYZ -> CREST 3.0.2 -> AIMNet2/MACE -> CPU PySCF` conformer search and optimization | `CHEM312` M1, `CHEM490`, `CHEM410`, `CHEM411` |
+| `.github/workflows/04_crest_nci_dimer_bsse.yml` | `CREST --nci` ellipsoidal wall sampling + PySCF Boys-Bernardi counterpoise BSSE | `CHEM312` M3 (Week 10/11) |
+| `.github/workflows/05_gvpt2_6shard_anharmonic.yml` | Deterministic 6-shard (`shard: 0..5`) Barone GVPT2 displaced-Hessian anharmonic workflow (`vpt2_anharmonic`) | `CHEM312` M3 |
+| `.github/workflows/06_aimnet2_neb_pyscf_rxn_profile.yml` | Charge-aware `AIMNet2` 11-image CI-NEB + TS polish + IRC + PySCF `DF-wB97X-D3/def2-TZVPP + PCM` via `cochem-kinetic rxn-profile` | `CHEM312` M3 (Week 10) |
+| `.github/workflows/07_spcat_8_18ghz_prediction.yml` | Watson A-reduction SPCAT 8–18 GHz CP-FTMW prediction (`T_rot = 2.0 K`) + L1–L3 `FactLedger` dossier | `CHEM312` M4, `CHEM490` |
 
-Compare the CREST and MACE rankings in `ranking.json`. In `pyscf.json`, check SCF and optimizer convergence, energy in hartree and gradient in hartree/bohr. Compare the selected CREST geometry with `refined.xyz`. Which bonds or angles changed? Both candidate and refined geometries preserve atom order. The checkpoint is fetched from the [official academic model distribution](https://github.com/ACEsuit/mace-off) and its SHA-256 is checked before use.
+### CHEM 312 M2–M4 Analysis CLI Tools (`scripts/`)
 
-## Submit to the instructor
+| Script | Module | Purpose |
+| --- | --- | --- |
+| `scripts/kk_atr_correct.py` | M2 | Single-bounce diamond ATR-FTIR (`n_1 = 2.417`, `45 deg`) Kramers-Kronig phase retrieval and Fresnel inversion (`n(nu)`, `kappa(nu)`, `Delta_nu` blue-shift) |
+| `scripts/vdw_titration_diff.py` | M3 | 1:1 `monomer...H2O` / `monomer...CO2` C=O vibrational shift + counterpoise BSSE report (`PENDING` for unmeasured ATR spectra) |
+| `scripts/fermi_deperturb.py` | M3 | Exact 2x2 secular matrix Martin Fermi resonance deperturbation (`nu_1^0`, `2*nu_2^0`, `|W|`, mixing angle `theta`) |
+| `scripts/gvpt2_shard_runner.py` | M3 | Deterministic 6-shard (`0..5`) GVPT2 displacement planner, shard runner, and incomplete-shard-safe aggregator |
+| `scripts/fact_ledger.py` | M4 | Cryptographic L1–L3 SHA-256 `FactLedger.json` / `FactLedger.md` builder and fail-closed tamper verifier |
 
-1. Open the successful run summary and download **CoChem-student-handoff** under **Artifacts**.
-2. Unzip the GitHub download once. It contains a `CoChem-…zip` and its matching `.sha256` file. Preserve the inner ZIP intact.
-3. Open the shared Google Drive folder provided by your instructor, using your course Google account. Choose **New → File upload** and select both files. Check that both names appear, then provide the run URL with your submission. GitHub does not need access to your Drive.
+## 3. Generalized Scientific Domain (`cochem.student-handoff/2`)
 
-## Receive for Pipeline 5.0.0
+- **Elements (11):** `H`, `B`, `C`, `N`, `O`, `F`, `Si`, `P`, `S`, `Cl`, `Br`
+- **Electronic state:** `charge` in `{-2, -1, 0, +1, +2}`, `multiplicity` in `{1, 2, 3}` (checked for electron-spin parity)
+- **Size budgets:** `1..64` atoms per frame, `1..256` frames per trajectory
+- **MLFF routing rule:** Charge-aware **`AIMNet2`** is mandatory whenever `charge != 0`, `multiplicity != 1`, or any heteroatom (`F`, `S`, `Cl`, `Br`, `P`, `Si`, `B`) is present. Neutral-only `MACE-OFF24` is permitted only for neutral singlet `H/C/N/O` molecules.
+- **CPU PySCF refinement:** `RHF`/`UHF`, `B3LYP-D3BJ`, or `(DF-)wB97X-D3` with `STO-3G`, `def2-SVP`, `def2-TZVP`, or `def2-TZVPP`, optional `gas` / `pcm` / `ddcosmo` solvation, and optional harmonic frequency check (`hessian_calculated`, `n_imaginary_modes`).
+- **Collaborator institution:** `"Tennessee Tech University"`.
 
-Download the pair from the course folder. Open the submitted run in the student's fork and copy the 64-character ZIP hash from the run summary. In a BASE checkout with Python 3.12, substitute that hash and your local paths in this command.
+## 4. Portable Verification & Pipeline 5.0.0 Handoff
 
-```sh
-python student/handoff.py /path/to/CoChem-example.zip --expected-sha256 HASH_FROM_ACTIONS --stage /path/to/research-inbox
+Every workflow seals a `cochem.student-handoff/2` ZIP archive together with a
+`.zip.sha256` sidecar. Verify any `v1` (`cochem.student-conformer-handoff/1`) or
+`v2` (`cochem.student-handoff/2`) bundle using only the Python standard library:
+
+```bash
+python student/handoff.py path/to/CoChem-bundle.zip --sidecar path/to/CoChem-bundle.zip.sha256 --stage ./received
 ```
 
-The receiver validates file membership, byte digests, atom order, the native CREST ensemble, the MACE selection and the converged PySCF result. It stages into a directory named for the ZIP SHA-256. The manifest records the producing repository, commit, run and attempt. `isomers/crest-NNN.xyz` supplies individual candidates. `refined.xyz` supplies the optimized candidate. `crest_conformers.xyz` is the native pool with energies in hartree. Retain the original ZIP alongside the run URL.
-
-For a Pipeline 5.0.0 continuation, copy the received directory to storage accessible to the chosen Colab, GCP or workstation worker. Keep the ZIP digest with the research record. Point each research step at its selected `isomers/crest-NNN.xyz` or `refined.xyz` and record charge 0 and multiplicity 1 for this route. Choose the research method, resources and completion test, then submit through the instructor's normal SRS and manager queue. The instructor controls when the larger jobs start.
+Upload both the inner `.zip` and `.zip.sha256` file to your course's Pipeline 5.0.0
+handoff folder for automated workstation, Colab GPU, or GCP Spot continuation.

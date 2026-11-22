@@ -3,17 +3,29 @@ name: CoChem private project access controller
 on:
   issues:
     types: [opened, reopened, edited]
+  # Automatic schedule/cron triggers are disabled under the 0 paid Actions minutes policy.
+  # Use manual workflow_dispatch (operation: sweep) for durable inbox recovery.
   workflow_dispatch:
     inputs:
       project_repository:
         description: Student-owned private project as owner/project
         type: string
-        required: true
+        required: false
       engines:
         description: Optional licensed engines (orca cfour, or empty)
         type: string
         default: orca cfour
         required: false
+      operation:
+        description: Instructor maintenance (withdrawal preserves project files and downloaded data)
+        type: choice
+        options:
+          - provision
+          - reconcile
+          - deprovision
+          - sweep
+        default: sweep
+        required: true
 
 # Enrollment data never becomes shell source or a checkout ref. A controller
 # comment may report readiness, but neither student source nor workflows change.
@@ -22,6 +34,11 @@ permissions:
   issues: write
 
 concurrency:
+  # All issues and instructor maintenance share this repository-wide group.
+  # Private ownership variables have no CAS: never narrow this to an issue/run
+  # or allow a second lifecycle workflow to mutate the same project in parallel.
+  # GitHub retains only one pending run. All issue runs sweep the durable inbox;
+  # recurring/manual sweeps recover requests whose event wake-up was discarded.
   group: cochem-project-access-${{ github.repository }}
   cancel-in-progress: false
 
@@ -64,4 +81,7 @@ jobs:
           COCHEM_ORCA_ASSET_CREDENTIAL: ${{ secrets[vars.COCHEM_ORCA_ACCESS_SECRET] }}
           COCHEM_CFOUR_ASSET_CREDENTIAL: ${{ secrets[vars.COCHEM_CFOUR_ACCESS_SECRET] }}
           COCHEM_SOURCE_CREDENTIAL: ${{ secrets[vars.COCHEM_SOURCE_ACCESS_SECRET] }}
+          COLAB_OFFLOAD_DISPATCH_TOKEN: ${{ secrets[vars.COCHEM_COLAB_ACCESS_SECRET] }}
+          COCHEM_ACCESS_SOURCE_REPOSITORY: ${{ vars.COCHEM_ACCESS_SOURCE_REPOSITORY }}
+          COCHEM_ACCESS_SOURCE_REVISION: ${{ vars.COCHEM_ACCESS_SOURCE_REVISION }}
         run: python scripts/provision_student_project_access.py

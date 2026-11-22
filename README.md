@@ -1,70 +1,113 @@
 # CoChem-BASE
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 
-CoChem-BASE is the place to upload your scientific files, choose a calculation
-and inspect its results. It prepares the other CoChem components, including
-TOPOS and TORQ, for you.
+CoChem helps you study molecular shapes, energies and interactions using
+computer calculations. **CoChem-BASE is the one project you start with.** Its
+browser interface prepares the CoChem tools, including TOPOS and TORQ, and
+brings your files, calculations and results together.
 
-## Start the student conformer lab
+## Students: start your project here (4 clicks — no secrets or enrollment needed)
 
-Fork this repository into your own account. Open **Actions → Student conformers (CREST, MACE, CPU PySCF)** in your fork to run the ethanol example. The workflow exports your conformers and the optimized geometry for your instructor. [Run and submit a calculation](student/README.md) · [Ethanol lab and worked comparison](student/ETHANOL_LAB.md)
+**[Open the step-by-step student guide](.docs/GET_STARTED.md#student-personal-project)**
 
-## Use the BASE dashboard
+You use buttons and menus in your web browser. You do not need to install Python,
+type computer commands, request organization invites, or install a GitHub App.
+`CoChem-BASE` automatically provisions **`PySCF`**, **`xTB`**, **`CREST`**,
+**`TOPOS`**, and **`TORQ`** inside your GitHub Codespace, and connects to
+**`GPU4PySCF`** on Google Colab GPU.
 
-**[Open CoChem and run a dashboard calculation](.docs/GET_STARTED.md)**
+### 1. Create your GitHub account and copy `CoChem-BASE`
 
-Already viewing the CoChem dashboard in your browser?
+1. Sign in to your [GitHub account](https://github.com/signup) (or create one).
+2. Open [ProfJJK-CoChem/CoChem-BASE](https://github.com/ProfJJK-CoChem/CoChem-BASE).
+3. Click **Use this template → Create a new repository** (or **Fork**) near the top right.
+4. Under **Owner**, select **your own GitHub username** and name your repository
+   **`CoChem-[target-molecule]`** (for example `CoChem-benzene-water`), then click
+   **Create repository**.
 
-1. Open **Start here**, select **GitHub Actions** under **Run calculations on**,
-   and choose **Check ORCA & CFOUR**.
-2. Open **Your files** and upload your own structures or other scientific inputs.
-   For a molecular calculation, select the intended frame, choose **Use selected
-   starting geometry**, then **Continue to calculation settings**.
-3. In **Calculations → Method and settings**, check charge and spin, then choose
-   the assigned engine, method, basis and surroundings. Choose the task under
-   **Calculate** and select **Run on GitHub Actions**.
+### 2. Open CoChem in GitHub Codespaces
 
-Open **Explain…** beside a setting for examples and scientific guidance. Use
-**Scientific terms** in the sidebar to search definitions; your calculation draft
-stays in place. The TOPOS and TORQ tabs have their own named start buttons.
+1. On **your new repository's page**, click the green **Code** button.
+2. Select the **Codespaces** tab, then click **Create codespace on main**.
+3. Wait 2–4 minutes while your Codespace prepares `PySCF`, `xTB`, `CREST`,
+   `TOPOS`, and `TORQ`. Port **8866 (`CoChem Voilà dashboard`)** displays a live
+   auto-refreshing setup progress page and automatically opens the CoChem
+   dashboard as soon as setup finishes. (If the browser tab did not open
+   automatically, open VS Code's **Ports** panel at the bottom and click the
+   globe icon next to **8866 — CoChem Voilà dashboard**.)
 
-If an engine is unavailable, follow the explanation beside it in **Start here**.
-ORCA and CFOUR are **optional and strongly recommended**. Missing access to one
-leaves only its dependent choices unavailable. You can still upload files and
-use the installed free methods.
+### 3. Work through the CoChem dashboard
 
-## Open the interface
-
-In your project on GitHub, choose **Code → Codespaces → Create codespace**.
-A Codespace is your browser-based VS Code workspace. Approve the project
-permissions GitHub requests, then wait for automatic setup.
-Open **8866 — CoChem Voilà dashboard** from VS Code's **Ports** panel; keep
-that port **Private**.
-
-The Codespace displays the interface. **GitHub Actions** runs a calculation on a
-separate computer and returns its results. No student terminal commands, Python
-editing, access-token entry or separate TOPOS/TORQ checkout are required.
-
-**Using the instructor's existing repository?** Start with its configured
-access; you do not need a student App invitation. **Creating your own private
-project?** Follow the [student setup steps](.docs/GET_STARTED.md#student-personal-project).
-Your instructor must prepare that access before you can use private engines.
-
-## Find what you need
-
-| I want to… | Open… |
+| In CoChem, open… | What you do |
 | --- | --- |
-| Get started, enable an engine, or understand a setup message | [Quick start and troubleshooting](.docs/GET_STARTED.md) |
-| Upload XYZ, MOL/SDF, MOL2, PDB, QCSchema, conformer pools or measured data | [Scientific input and research guide](.docs/Student_Research_No_Code.md#use-the-scientific-input-library) |
-| Set up student-owned projects as an instructor | [Instructor access setup](.docs/GET_STARTED.md#instructor-prepare-student-access) |
-| Collect student work through Classroom50 | [Classroom50 assignment guide](.docs/Classroom50_Assignment_Deployment.md) |
-| Read the software's tested scope and remaining work | [Implementation status](.docs/SRS_Implementation_Status.md) |
+| **Start here** | Confirm **Run calculations on** is set to **Linux** (your Codespace, where `PySCF`, `xTB`, `CREST`, `TOPOS`, and `TORQ` are ready immediately) or use the Google Colab GPU notebook for **`GPU4PySCF`**. |
+| **Your files** | Upload your own scientific inputs (such as Avogadro 2 `.xyz` files) and select the starting structure. |
+| **Calculations** | Inspect **Starting structure**, choose **`PySCF`** or **`xTB`**, enter your study's charge, multiplicity, method, and basis set, and run the calculation. |
+| **Results** | Inspect the available values, structures, tables, and figures, and click **Download calculation bundle** to save a copy to your computer. |
 
-Students supply their own starting structures and scientific files. XYZ is one
-supported format, not the only input route. BASE keeps uploaded originals and
-calculation records so results can be checked later.
+**[Continue with the full instructions: upload, calculate, save and submit](.docs/GET_STARTED.md#6-upload-your-own-scientific-files)**
+
+Open **Explain…** beside a setting, or **Scientific terms** in the sidebar,
+whenever a word is unfamiliar. You can read the help without losing your draft.
+ORCA and CFOUR are **optional and strongly recommended** calculation programs.
+If one is unavailable, its dependent choices stay unavailable; other available
+features remain usable. Your instructor fixes lab access—students do not enter
+tokens or download licensed engine archives.
+
+**Save your work:** keep your original input files on your own computer and
+use **Download calculation bundle** after retrieving a result. Uploaded research
+files and results are stored separately from the code; saving or synchronizing
+the repository does not back them all up. Follow the guide's
+[save and submit steps](.docs/GET_STARTED.md#9-save-and-submit-your-work), then
+[stop your Codespace](.docs/GET_STARTED.md#10-stop-and-reopen-your-workspace)
+when finished.
+
+## Public-Fork CURE Route (`XYZ -> CREST -> MLFF -> CPU PySCF`)
+
+In addition to private/template research repositories (such as CHEM 490 ORCA 6.1.1,
+CFOUR, SPFIT, and SPCAT studies), **Tennessee Tech University** courses (`CHEM312`,
+`CHEM490`, `CHEM410`, `CHEM411`) support an open-engine public-fork CURE route covering
+`H, B, C, N, O, F, Si, P, S, Cl, Br`, charges `-2..+2`, multiplicities `1..3`, up to
+64 atoms, and 256 conformer/trajectory frames:
+
+1. **Dashboard-first (recommended):** Use the 4-click Codespaces Voilà dashboard
+   above (port **8866**) to upload your `.xyz` structure, verify charge and spin
+   multiplicity, run `CREST`, `xTB`, `PySCF`, `TOPOS`, or `TORQ`, and download your
+   sealed results bundle.
+2. **Manual GitHub Actions fallback (`workflow_dispatch` only):** Open your fork's
+   **Actions** tab and dispatch one of the manual course workflows (zero automatic
+   `push:` triggers and zero `schedule:` crons):
+   - **[Student conformers](.github/workflows/student_conformers.yml):** `XYZ -> CREST 3.0.2 (--legacy --xnam --nocross --chrg --uhf) -> charge-aware AIMNet2 (mandatory for Q != 0, open-shell, or F/S/Cl/Br/P/Si/B; optional MACE-OFF24 for neutral H/C/N/O) -> CPU PySCF (RHF/B3LYP-D3BJ/wB97X-D3, optional PCM/ddCOSMO & frequencies)`.
+   - **[CHEM 312 Reaction Profile](.github/workflows/06_aimnet2_neb_pyscf_rxn_profile.yml):** Charge-aware `AIMNet2` 11-image CI-NEB + TS polish + IRC + PySCF `DF-wB97X-D3/def2-TZVPP + PCM` via `cochem-kinetic rxn-profile`.
+   - **[CHEM 312 NCI Dimer & BSSE](.github/workflows/04_crest_nci_dimer_bsse.yml):** `CREST --nci` ellipsoidal wall sampling + PySCF Boys-Bernardi counterpoise BSSE.
+3. **Pipeline 5.0.0 ZIP handoff (`cochem.student-handoff/2`):** Every workflow seals a
+   portable ZIP archive with a `.sha256` sidecar (backward-compatible with `v1` bundles).
+   Verify locally with pure Python stdlib before uploading to your course handoff folder:
+
+   ```bash
+   python student/handoff.py path/to/CoChem-bundle.zip --sidecar path/to/CoChem-bundle.zip.sha256 --stage ./received
+   ```
+
+   See [`student/README.md`](student/README.md) for full details.
+
+## Find the right guide
+
+| You need… | Open… |
+| --- | --- |
+| Every student step, from a new account to your first saved result | [Student start guide](.docs/GET_STARTED.md#student-personal-project) |
+| Help with a missing button, unavailable engine or setup message | [Troubleshooting](.docs/GET_STARTED.md#understand-a-setup-message) |
+| Supported inputs, monomers/complexes, TOPOS/TORQ analyses and interpreting results | [Scientific research guide](.docs/Student_Research_No_Code.md) |
+| Instructor preparation for personal student projects | [Instructor access setup](.docs/GET_STARTED.md#instructor-prepare-student-access) |
+| Optional Colab GPU access, current limits and instructor secret setup | [Colab GPU setup](.docs/Google_Colab_GPU_Setup.md) |
+| Classroom50 assignment submission and collection | [Classroom50 guide](.docs/Classroom50_Assignment_Deployment.md) |
+
+Classroom50 provides your course instructions and submission route. Your private
+`CoChem-` project is where you work. Follow your instructor's instructions to
+share the finished report; a private project is not automatically visible to
+an instructor. Student-owned projects use that account's Actions allowance;
+Codespaces has a separate allowance. Check the payer and usage shown by GitHub
+before agreeing to paid use.
 
 <details>
 <summary><strong>Other calculation environments: local computer or HPC</strong></summary>
@@ -169,7 +212,8 @@ reduce the requirements of larger calculations.
 <details>
 <summary><strong>Architecture, development checks and completion handoff</strong></summary>
 
-Maintainers should read the [workstation completion handoff](.docs/WORKSTATION_COMPLETION_HANDOFF.md).
+Replacement agents should start with the [current takeover brief](.docs/AGENT_TAKEOVER.md),
+then read the [complete implementation backlog](.docs/WORKSTATION_COMPLETION_HANDOFF.md).
 The governing requirements are [SRS Chunk 17](.docs/SRS_Chunk_17_CoChem_BASE_Architecture.md)
 plus [proposal additions](.docs/SRS_Chunk_Proposal_CoChem_BASE_Architectural_Review.md).
 The [ingestion specification](.docs/task1_subsystems_architectural_specification.md)

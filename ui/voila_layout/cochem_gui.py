@@ -8,11 +8,13 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
 import uuid
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -65,6 +67,7 @@ from cochem_base.theory_matrix import (
     validate_product_class_policy,
 )
 from ui.voila_layout.input_management import InputManagementMixin
+from ui.voila_layout.learning import progress_label
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -323,19 +326,102 @@ def licensed_engine_availability(registry_path: str | Path | None = None) -> dic
     return availability
 
 
+from cochem_base.interfaces.student_hpc import StudentHpcSubmissionUnknown
+
+
+@dataclass(frozen=True)
+class _LocalSubmission:
+    config_bytes: bytes
+    artifact_root: Path
+    selected_id: str | None
+    record_bytes: bytes | None
+    source_kind: str
+    unavailable_code: str | None = None
+    message: str = ""
+
+
+def _saved_xtb_result_markup(execution_receipt: dict, observation: dict, details: dict) -> str:
+    """Format already validated immutable values; never reopen their source paths."""
+    state = observation["electronic_state"]
+    explanation = (
+        "Energy calculated at the supplied geometry. No geometry optimization was requested."
+        if execution_receipt["operation"] == "single_point" else
+        "Geometry optimization finished. The optimizer’s stopping checks passed. "
+        "This does not prove that the structure is a minimum.")
+    return (
+        "<section class='cochem-saved-result'><h3>Saved xTB screening result</h3>"
+        "<p>" + html.escape(explanation) + "</p>"
+        "<p><b>Method:</b> " + html.escape(observation["method"]["method"])
+        + "<br><b>Electronic energy:</b> " + f"{observation['energy_hartree']:.12f} Hartree"
+        + "<br><b>Total charge:</b> " + str(state["charge"])
+        + " · <b>Spin multiplicity:</b> " + str(state["multiplicity"]) + "</p>"
+        "<p>These are the saved calculation’s settings. Changes to your current draft do not change this result. "
+        "These are calculated estimates. Their accuracy for your goal has not been established. They do not show which structures are in a real sample or how much of each is present.</p>"
+        "<details class='cochem-calculation-details'><summary>Calculation details and provenance</summary><pre>"
+        + html.escape(json.dumps(details, indent=2, allow_nan=False, sort_keys=True)) + "</pre></details></section>"
+    )
+
+
+
+def completed_xtb_result_html(execution_receipt: dict, results_directory: Path) -> str:
+    """Validate a newly completed local result independently of every draft field."""
+    from cochem_base.interfaces.student_reports import (
+        observation_from_completed_local_calculation, verify_source,
+    )
+    observation = observation_from_completed_local_calculation(
+        execution_receipt, results_directory=results_directory)
+    saved = {name: json.loads((results_directory / name).read_text(encoding="utf-8"))
+             for name in ("matrix_config.validated.json", "result.json", "execution_authority.json")}
+    for source in observation["provenance_sources"]:
+        verify_source(source)
+    details = {"actual_execution": execution_receipt, "saved_configuration": saved["matrix_config.validated.json"],
+               "final_result": saved["result.json"], "execution_authority": saved["execution_authority.json"],
+               "retained_source_receipts": observation["provenance_sources"]}
+    return _saved_xtb_result_markup(execution_receipt, observation, details)
+
+
+def reopened_xtb_result_html(verified: Any) -> str:
+    """Render exactly the backend-verified byte snapshot, without a second file read.
+
+    The results directory is a provenance locator, never input to this formatter.
+    This presentation seam does not grant an arbitrary result execution authority.
+    """
+    execution, observation = verified.execution_receipt, verified.observation
+    details = {"actual_execution": execution, "saved_configuration": verified.configuration,
+               "final_result": verified.native_result, "saved_input_context": verified.input_context,
+               "retained_source_receipts": observation["provenance_sources"]}
+    return _saved_xtb_result_markup(execution, observation, details)
+
+
 class CoChemGUI(InputManagementMixin):
     def __init__(self) -> None:
+        from ui.voila_layout.initial_widget_state import ensure_widget_runtime
+        ensure_widget_runtime()
         self.state = CoChemGUIState()
+        self._remote_stops: dict[str, dict[str, Any]] = {}
+        self._job_stop_lock = threading.RLock()
+        self._topos_attention = False
         self._pipeline_running = False
         self._pipeline_cancellation = threading.Event()
         self._student_research_running = False
         self._student_uploads: dict[str, dict[str, Any]] = {}
+        self._generated_input_provenance = {}
+        self._local_file_workers = []
+        self._local_file_workers_lock = threading.RLock()
+        self._local_file_operation = None
+        self._local_view_generation = object()
+        self._viewed_local_record_id = None
+        self._expected_local_card_update = None
+        self._saved_local_summaries = {}
+        self._saved_local_catalog_available = False
         self._input_library: dict[str, dict[str, Any]] = {}
         self._input_library_refresh_serial = 0
         self._ingestion_busy = False
         self._inbox_stop = threading.Event()
         self._student_setup_busy = False
         self._hpc_running = False
+        self._hpc_unknown_active = False
+        self._hpc_unknown_attempt = None
         self._hpc_retrieving = False
         self._hpc_submission: dict[str, Any] | None = None
         self._hpc_job_serial = 0
@@ -347,6 +433,10 @@ class CoChemGUI(InputManagementMixin):
         self._hpc_monitor_stop = threading.Event()
         self._hpc_history_loaded = threading.Event()
         self._actions_running = False
+        self._actions_admission_checked = None
+        self._actions_state_operation = None
+        self._actions_admission_checking = False
+        self._actions_admission_generation = 0
         self._actions_submission: dict[str, Any] | None = None
         self._actions_client = None
         self._actions_monitor_stop = threading.Event()
@@ -475,6 +565,14 @@ class CoChemGUI(InputManagementMixin):
                                                     style={'description_width': 'initial'})
         self.native_operation = widgets.Dropdown(options=list(self.actions_operation.options), value='optimization',
             description='Calculation operation:', style={'description_width': 'initial'})
+        self.xtb_task = widgets.Dropdown(
+            options=[("Calculate energy at the current geometry", "single_point"),
+                     ("Optimize the geometry", "optimization")],
+            value="optimization", description="Calculation task:",
+            style={"description_width": "initial"}, layout=widgets.Layout(width="100%"))
+        self.xtb_task_controls = widgets.VBox([self.xtb_task, widgets.HTML(
+            "<p class='cochem-hint'>Calculating energy keeps the supplied coordinates fixed. "
+            "Optimizing lets the atoms move. Neither task proves that a structure is a minimum.</p>")])
         self.native_timeout = widgets.BoundedIntText(value=1800, min=30, max=172800,
             description='Native timeout (s):', style={'description_width': 'initial'})
         self.native_job_options = widgets.VBox([self.native_operation, self.native_timeout,
@@ -502,7 +600,7 @@ class CoChemGUI(InputManagementMixin):
                 ('GitHub Actions', 'github-actions'),
                 ('HPC Cluster (Slurm/PBS)', 'hpc')
             ],
-            value='github-actions' if os.environ.get('CODESPACES', '').lower() == 'true' else
+            value='github-actions' if os.environ.get('COCHEM_DEFAULT_CALC_ENV', '').strip().lower() == 'github-actions' else
                   'macos' if sys.platform == 'darwin' else 'local' if os.name == 'nt' else 'linux',
             description='Run calculations on:',
             style={'description_width': 'initial'}
@@ -840,7 +938,7 @@ class CoChemGUI(InputManagementMixin):
         self.btn_topos_submit = widgets.Button(description="Start conformer search", button_style="success")
         self.btn_topos_submit.on_click(self._start_topos_search)
         self.btn_topos_cancel = widgets.Button(description="Cancel conformer search", disabled=True)
-        self.btn_topos_cancel.on_click(lambda _: self._topos_cancellation.set())
+        self.btn_topos_cancel.on_click(self._cancel_topos_search)
         self.btn_topos_promote = widgets.Button(description="Publish conformer ensemble", disabled=True)
         self.btn_topos_promote.on_click(self._promote_topos_search)
         self._refresh_topos_capabilities()
@@ -925,6 +1023,8 @@ class CoChemGUI(InputManagementMixin):
         self.matrix_engine.observe(update_preview, 'value')
         self.actions_operation.observe(update_preview, 'value')
         self.native_operation.observe(update_preview, 'value')
+        self.xtb_task.observe(update_preview, 'value')
+        self.xtb_task.observe(self._check_dispersion_gate, 'value')
         self.native_timeout.observe(update_preview, 'value')
         self.native_operation.observe(self._check_dispersion_gate, 'value')
         self.cfour_operation.observe(update_preview, 'value')
@@ -1063,24 +1163,10 @@ class CoChemGUI(InputManagementMixin):
                 return
             with self.viewer_output:
                 try:
-                    import py3Dmol
                     from IPython.display import display
+                    from cochem_base.interfaces.molecule_viewer import molecule_viewer_html
 
-                    from cochem_base.geometry.nuclide_geometry import parse_geometry_identity
-                    identity = parse_geometry_identity(xyz_data)
-                    viewer_xyz = str(len(identity.elements)) + "\nBASE display geometry; nuclear labels retained in input\n" + "\n".join(
-                        element + " " + " ".join(format(value, ".17g") for value in row)
-                        for element, row in zip(identity.elements, identity.coordinates_angstrom, strict=True)) + "\n"
-                    view = py3Dmol.view(width='100%', height=300)
-                    view.addModel(viewer_xyz, 'xyz')
-                    view.setStyle({'stick': {}, 'sphere': {'radius': 0.4}})
-                    view.zoomTo()
-                    rendered = view.write_html()
-                    # Uploading a new geometry can remove an earlier viewer
-                    # while its library promise is pending. Never instantiate
-                    # WebGL against a detached/missing DOM element.
-                    guard = f'if (!document.getElementById("3dmolviewer_{view.uniqueid}")) {{ return; }}\n'
-                    rendered = rendered.replace('$3Dmolpromise.then(function() {', '$3Dmolpromise.then(function() {\n' + guard, 1)
+                    rendered = molecule_viewer_html(xyz_data)
                     display({'application/3dmoljs_load.v0': rendered, 'text/html': rendered}, raw=True)
                 except ImportError:
                     print("The 3D viewer is unavailable. Open CoChem setup and choose Retry setup.")
@@ -1195,6 +1281,7 @@ class CoChemGUI(InputManagementMixin):
         self.btn_cancel.on_click(self._cancel_pipeline)
         self.telemetry_output = BoundedTelemetryOutput(layout=widgets.Layout(border='1px solid #ccc', height='400px', overflow='auto', padding='5px'))
         self.calculation_result = widgets.HTML("<i>No accepted calculation result yet.</i>")
+        self._build_local_calculation_controls()
         self.execution_description = widgets.HTML()
         self.actions_status = widgets.HTML("<p role='status'>No remote calculation submitted.</p>")
         self.btn_actions_refresh = widgets.Button(description="Refresh calculation status", disabled=True)
@@ -1210,7 +1297,9 @@ class CoChemGUI(InputManagementMixin):
             description="Previous calculations:", style={'description_width': 'initial'}, layout=widgets.Layout(width='90%'))
         self.btn_actions_open = widgets.Button(description="Open selected calculation", disabled=True)
         self.btn_actions_open.on_click(self._open_student_actions_history)
-        self.actions_controls = widgets.VBox([self.actions_status,
+        self.btn_actions_recover = widgets.Button(description="Check saved project request")
+        self.btn_actions_recover.on_click(self._recover_actions_admission)
+        self.actions_controls = widgets.VBox([self.actions_status, self.btn_actions_recover,
             self.actions_history, self.btn_actions_open,
             widgets.HBox([self.btn_actions_refresh, self.btn_actions_retrieve]), self.actions_results_download],
             layout=widgets.Layout(display='none'))
@@ -1374,7 +1463,7 @@ class CoChemGUI(InputManagementMixin):
         self.btn_periodic_run.on_click(self._execute_periodic_pipeline)
         self.btn_periodic_cancel = widgets.Button(description="Cancel periodic calculation", disabled=True,
                                                   layout=widgets.Layout(width='auto'))
-        self.btn_periodic_cancel.on_click(self._cancel_pipeline)
+        self.btn_periodic_cancel.on_click(self._cancel_local_calculation)
         self.periodic_structure_status = widgets.HTML("<p role='status'>No periodic structure loaded.</p>")
         self.view_periodic = widgets.VBox([
             widgets.HTML("<h3>Product B periodic structure ingestion</h3><p>Load an ordered bulk CIF or explicitly unit-labelled periodic JSON. Cell vectors, fractional coordinates and source hashes are preserved. Disordered or partially occupied structures require resolved input.</p>"),
@@ -1460,6 +1549,24 @@ class CoChemGUI(InputManagementMixin):
         self._refresh_student_actions_history()
         self._restore_student_inputs()
         self._restore_student_scientific_inputs()
+        from ui.voila_layout.initial_widget_state import arm_initial_widget_state
+        # These 15 fixed models receive the initial asynchronous library scan.
+        # Their own frontend acknowledgement replays only labels/display state;
+        # selection indices and scientific drafts are never replayed.
+        self._initial_library_state_models = (
+            self.input_library_table, self.input_library_rejections, self.input_library_status,
+            self.btn_input_refresh, self.btn_use_input_geometry, self.btn_remove_input,
+            self.input_library_choice, self.input_record_choice, self.input_pool_choices,
+            *self._input_selectors.values(),
+        )
+        for model in self._initial_library_state_models:
+            arm_initial_widget_state(model)
+        self._initial_local_record_state_models = (
+            self.saved_local_calculation, self.saved_local_status, self.btn_refresh_saved_local,
+        )
+        for model in self._initial_local_record_state_models:
+            arm_initial_widget_state(model)
+        self._refresh_saved_local_calculations()
         self._refresh_input_library()
         self._start_course_project_discovery()
         atexit.register(self._inbox_stop.set)
@@ -1480,6 +1587,168 @@ class CoChemGUI(InputManagementMixin):
             callback()
             return
         callback()
+
+    def _refresh_running_jobs(self) -> None:
+        """Summarize this GUI's owned jobs without inferring remote termination."""
+        if not hasattr(self, 'guided_cancel'):
+            return
+        jobs = []
+        if self._pipeline_running:
+            message = ('stop requested; waiting for owned work to finish'
+                       if self._pipeline_cancellation.is_set() else 'running')
+            jobs.append(('Local calculation or geometry analysis', message))
+        if self._topos_running:
+            message = ('stop could not be confirmed; select Stop running jobs to retry'
+                       if self._topos_attention else
+                       'stop requested; waiting for owned search to finish'
+                       if self._topos_cancellation.is_set() else 'running')
+            jobs.append(('Native conformer search', message))
+        for kind, label in (('hpc', 'HPC calculation'), ('actions', 'GitHub calculation'),
+                            ('remote_probe', 'Remote engine check')):
+            if getattr(self, '_' + kind + '_running'):
+                if kind == 'hpc' and self._hpc_unknown_active:
+                    jobs.append(('HPC request waiting for confirmation', 'stop requested; waiting for the calculation service to confirm this job'
+                        if self._remote_stops.get(kind, {}).get('requested') else 'contact the instructor or cluster support before submitting again'))
+                    if self._hpc_submission is None:
+                        continue
+                context = self._remote_stops.get(kind, {})
+                message = context.get('message') or ('stop requested; waiting for the calculation service to confirm this job'
+                    if context.get('requested') else 'submitting or running')
+                jobs.append((label, message))
+        self.guided_cancel.disabled = not jobs
+        self.guided_jobs_status.value = ('<ul>' + ''.join(
+            '<li>' + html.escape(label) + ': ' + html.escape(message) + '</li>'
+            for label, message in jobs) + '</ul>' if jobs else
+            '<p>No running jobs are currently tracked here.</p>')
+        self._refresh_local_file_controls()
+
+    def _new_remote_stop(self, kind: str) -> dict[str, Any]:
+        # Context object identity is the generation; it is never reused by a new job.
+        context = {'requested': False, 'inflight': False, 'sent': False,
+                   'client': None, 'submission': None, 'message': '', 'retry_required': False}
+        self._remote_stops[kind] = context
+        return context
+
+    def _bind_remote_stop(self, kind: str, client: Any, submission: dict[str, Any],
+                          context: dict[str, Any] | None = None) -> None:
+        with self._job_stop_lock:
+            explicit_context = context is not None
+            context = context if explicit_context else self._remote_stops.get(kind)
+            if context is None:
+                context = self._new_remote_stop(kind)
+            if self._remote_stops.get(kind) is not context:
+                return
+            previous = context['submission']
+            if previous is not None and previous.get('request_id') != submission.get('request_id'):
+                if explicit_context:
+                    return
+                context = self._new_remote_stop(kind)
+            context['client'], context['submission'] = client, dict(submission)
+            if (submission.get('admission_terminal') is True or
+                    not submission.get('admission_protocol') and submission.get('status') in {'completed', 'rejected'}):
+                context['message'] = 'finished; see the recorded outcome'
+            elif context['requested']:
+                self._send_remote_stop(kind, context)
+            self._ui_call(self._refresh_running_jobs)
+
+    def _request_remote_stop(self, kind: str) -> None:
+        with self._job_stop_lock:
+            if not getattr(self, '_' + kind + '_running'):
+                return
+            context = self._remote_stops.get(kind)
+            if context is None:
+                context = self._new_remote_stop(kind)
+            client = getattr(self, '_' + kind + '_client')
+            submission = getattr(self, '_' + kind + '_submission')
+            if client is not None and submission is not None:
+                previous = context['submission']
+                if previous is not None and previous.get('request_id') != submission.get('request_id'):
+                    context = self._new_remote_stop(kind)
+                self._bind_remote_stop(kind, client, submission, context)
+            context['requested'] = True
+            if context['retry_required']:
+                context['sent'] = False
+            context['retry_required'] = False  # Only a deliberate click retries an unconfirmed cancellation.
+            self._send_remote_stop(kind, context)
+            if kind == 'remote_probe':
+                monitor = context.get('monitor')
+                worker = getattr(self, '_remote_probe_worker', None)
+                if monitor is not None and (worker is None or not worker.is_alive()):
+                    self._remote_probe_worker = threading.Thread(target=monitor, daemon=True)
+                    self._remote_probe_worker.start()
+            self._refresh_running_jobs()
+
+    def _send_remote_stop(self, kind: str, context: dict[str, Any]) -> None:
+        """Cancel only a captured owned identity, keeping monitors alive."""
+        if self._remote_stops.get(kind) is not context or not context['requested']:
+            return
+        client, saved = context['client'], context['submission']
+        if saved is not None and (saved.get('admission_terminal') is True or
+                not saved.get('admission_protocol') and saved.get('status') in {'completed', 'rejected'}):
+            return
+        if client is None or saved is None or (kind != 'hpc' and saved.get('run_id') is None
+                and not (kind == 'actions' and saved.get('admission_protocol') == 'cochem.student-actions-admission/1')):
+            context['message'] = 'stop requested; waiting for the calculation service to confirm this job'
+            return
+        with self._job_stop_lock:
+            if context['inflight'] or context['sent'] or context['retry_required']:
+                return
+            context['inflight'] = True
+        submission = dict(saved)
+        context['message'] = 'requesting cancellation; waiting for confirmation'
+        def cancel() -> None:
+            try:
+                observed = client.cancel(submission)
+            except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                message = 'stop could not be confirmed; select Stop running jobs or this job’s Cancel to retry: ' + str(exc)
+                with self._job_stop_lock:
+                    context['inflight'] = False
+                    context['retry_required'] = True
+            else:
+                message = 'cancellation requested; waiting for the final remote outcome'
+                with self._job_stop_lock:
+                    context['inflight'], context['sent'] = False, True
+                if isinstance(observed, dict) and observed.get('status') == 'completed':
+                    message = 'finished; see the recorded remote outcome'
+            def publish() -> None:
+                if self._remote_stops.get(kind) is not context:
+                    return
+                current = getattr(self, '_' + kind + '_submission')
+                if current is None or current.get('request_id') != submission.get('request_id'):
+                    return
+                context['message'] = message
+                self._refresh_running_jobs()
+            self._ui_call(publish)
+        context['worker'] = threading.Thread(target=cancel, daemon=True)
+        context['worker'].start()
+
+    def _cancel_local_calculation(self, b: Any = None) -> None:
+        if self._pipeline_running:
+            self._pipeline_cancellation.set()
+            self.btn_cancel.disabled = True
+            self.btn_periodic_cancel.disabled = True
+            self.state.system_status = 'Stop requested; waiting for owned calculation cleanup'
+            self._refresh_running_jobs()
+
+    def _cancel_topos_search(self, b: Any = None) -> None:
+        if not self._topos_running:
+            return
+        self._topos_cancellation.set()
+        self.topos_status.value = '<p role="status">Stop requested; waiting for the owned conformer search to stop.</p>'
+        worker = getattr(self, '_topos_worker', None)
+        if self._topos_attention and (worker is None or not worker.is_alive()):
+            self._topos_attention = False
+            self._topos_worker = threading.Thread(target=self._poll_topos_search, daemon=True)
+            self._topos_worker.start()
+        self._refresh_running_jobs()
+
+    def _cancel_all_running_jobs(self, b: Any = None) -> None:
+        # Independent fan-out, including legacy/recovered concurrent operations.
+        self._cancel_local_calculation()
+        self._cancel_topos_search()
+        for kind in ('hpc', 'actions', 'remote_probe'):
+            self._request_remote_stop(kind)
+        self._refresh_running_jobs()
 
     def _start_course_project_discovery(self) -> None:
         """Resolve the original project off the UI thread when no launcher context exists."""
@@ -1649,6 +1918,7 @@ class CoChemGUI(InputManagementMixin):
         pool_options = {'producer': self.input_pool_producer.value, 'energy_unit': self.input_pool_energy_unit.value} if kind == 'conformer_pool' else {}
         self._ingestion_busy = True
         control.disabled = True
+        self._sync_library_geometry_use()
         self.input_library_status.value = "<p role='status'>Validating complete uploaded scientific inputs…</p>"
         def ingest() -> None:
             from cochem_base.config_loader import get_artifact_dir
@@ -1670,26 +1940,29 @@ class CoChemGUI(InputManagementMixin):
                 snapshot = {'inputs': accepted, 'rejections': []}
                 errors.append('Retained library refresh: ' + str(exc))
             def finish() -> None:
-                self._ingestion_busy = False
-                control.disabled = False
-                self._input_library_refresh_serial += 1
-                self._apply_input_library(snapshot)
-                self.input_library_status.value = (f"<p role='status'>Validated and retained {len(accepted)} input(s).</p>" +
-                    ("<p role='alert'>Rejected inputs: " + '<br/>'.join(html.escape(item) for item in errors) + '</p>' if errors else ''))
-                for receipt in accepted:
-                    input_id = receipt.get('input_id', receipt.get('id'))
-                    if input_id in self._input_library:
-                        self.input_library_choice.value = input_id
-                        for key, selector in self._input_selectors.items():
-                            if input_id in [value for _, value in selector.options]:
-                                selector.value = input_id
-                if hasattr(self, '_paw_pseudopotential_choices'):
-                    self._refresh_paw_species()
+                try:
+                    self._input_library_refresh_serial += 1
+                    self._apply_input_library(snapshot)
+                    self.input_library_status.value = (f"<p role='status'>Validated and retained {len(accepted)} input(s).</p>" +
+                        ("<p role='alert'>Rejected inputs: " + '<br/>'.join(html.escape(item) for item in errors) + '</p>' if errors else ''))
                     for receipt in accepted:
-                        if receipt.get('kind') == 'pseudopotential':
-                            chooser = self._paw_pseudopotential_choices.get(receipt.get('metadata', {}).get('element'))
-                            if chooser is not None and receipt['input_id'] in [value for _, value in chooser.options]:
-                                chooser.value = receipt['input_id']
+                        input_id = receipt.get('input_id', receipt.get('id'))
+                        if input_id in self._input_library:
+                            self.input_library_choice.value = input_id
+                            for key, selector in self._input_selectors.items():
+                                if input_id in [value for _, value in selector.options]:
+                                    selector.value = input_id
+                    if hasattr(self, '_paw_pseudopotential_choices'):
+                        self._refresh_paw_species()
+                        for receipt in accepted:
+                            if receipt.get('kind') == 'pseudopotential':
+                                chooser = self._paw_pseudopotential_choices.get(receipt.get('metadata', {}).get('element'))
+                                if chooser is not None and receipt['input_id'] in [value for _, value in chooser.options]:
+                                    chooser.value = receipt['input_id']
+                finally:
+                    self._ingestion_busy = False
+                    control.disabled = False
+                    self._sync_library_geometry_use()
             self._ui_call(finish)
         self._ingestion_worker = threading.Thread(target=ingest, daemon=True)
         self._ingestion_worker.start()
@@ -1724,8 +1997,12 @@ class CoChemGUI(InputManagementMixin):
         choices = [(str(item['filename']) + ' (' + item['kind'].replace('_', ' ') + ')', key)
                    for key, item in self._input_library.items()]
         selected = self.input_library_choice.value
+        selected_frame = self.input_record_choice.value
         self.input_library_choice.options = [("Choose an uploaded input", "")] + choices
         self.input_library_choice.value = selected if selected in self._input_library else ""
+        if (self.input_library_choice.value == selected and type(selected_frame) is int
+                and 0 <= selected_frame < len(self._input_library.get(selected, {}).get('records', []))):
+            self.input_record_choice.value = selected_frame
         for kind, selector in self._input_selectors.items():
             selected = selector.value
             allowed = {'install': {'hessian'}, 'hessian': {'hessian'}, 'telemetry': {'spectroscopy'},
@@ -1754,6 +2031,15 @@ class CoChemGUI(InputManagementMixin):
                           for item in self._input_library_rejections) + '</ul></div>')
         self._refresh_paw_species()
         self._sync_input_management(snapshot)
+        self._sync_library_geometry_use()
+
+    def _sync_library_geometry_use(self) -> None:
+        """Enable promotion only for the current validated selection while idle."""
+        receipt = self._input_library.get(self.input_library_choice.value, {})
+        frame_index = self.input_record_choice.value
+        self.btn_use_input_geometry.disabled = (
+            self._ingestion_busy or type(frame_index) is not int
+            or not 0 <= frame_index < len(receipt.get('records', [])))
 
     def _select_library_input(self, change: Any) -> None:
         receipt = self._input_library.get(change['new'], {})
@@ -1762,10 +2048,16 @@ class CoChemGUI(InputManagementMixin):
             for index in range(len(records))]
         if records:
             self.input_record_choice.value = 0
-        self.btn_use_input_geometry.disabled = not records
+        self._sync_library_geometry_use()
 
     def _use_library_geometry(self, b: Any = None) -> None:
         """Use a canonical parsed frame without modifying its uploaded source."""
+        if self._ingestion_busy:
+            self._sync_library_geometry_use()
+            self.input_library_status.value = (
+                '<p role="status">Wait for the current scientific input operation to finish '
+                'before selecting a starting geometry.</p>')
+            return
         from cochem_base.config_loader import get_artifact_dir
         from cochem_base.geometry.nuclide_geometry import parse_geometry_identity
         try:
@@ -1801,6 +2093,9 @@ class CoChemGUI(InputManagementMixin):
                 'multiplicity': multiplicity, 'fragments': None, 'coordinate_unit': 'angstrom',
                 'origin': 'canonical_ingestion', 'source_input_id': receipt.get('input_id', receipt.get('id')),
                 'source_sha256': receipt['sha256'], 'source_frame': frame_index}
+            known = self._generated_input_provenance.get(record['source_input_id'])
+            if known is not None:
+                record['generation_provenance'] = json.loads(known)
             (directory / 'input-manifest.json').write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
             self._student_uploads[key] = record
             self.student_geometry_choice.options = [(item['label'], key) for key, item in self._student_uploads.items()]
@@ -1824,6 +2119,7 @@ class CoChemGUI(InputManagementMixin):
             return
         self._ingestion_busy = True
         self.btn_inbox_scan.disabled = True
+        self._sync_library_geometry_use()
         def scan() -> None:
             errors, count = [], 0
             try:
@@ -1856,12 +2152,15 @@ class CoChemGUI(InputManagementMixin):
                 snapshot = {'inputs': list(self._input_library.values()), 'rejections': []}
                 errors.append(str(exc))
             def finish() -> None:
-                self._ingestion_busy = False
-                self.btn_inbox_scan.disabled = False
-                self._input_library_refresh_serial += 1
-                self._apply_input_library(snapshot)
-                self.input_library_status.value = f'<p role="status">Imported {count} new validated inbox input(s).</p>' + (
-                    '<p role="alert">' + '<br/>'.join(html.escape(item) for item in errors) + '</p>' if errors else '')
+                try:
+                    self._input_library_refresh_serial += 1
+                    self._apply_input_library(snapshot)
+                    self.input_library_status.value = f'<p role="status">Imported {count} new validated inbox input(s).</p>' + (
+                        '<p role="alert">' + '<br/>'.join(html.escape(item) for item in errors) + '</p>' if errors else '')
+                finally:
+                    self._ingestion_busy = False
+                    self.btn_inbox_scan.disabled = False
+                    self._sync_library_geometry_use()
             self._ui_call(finish)
         self._ingestion_worker = threading.Thread(target=scan, daemon=True)
         self._ingestion_worker.start()
@@ -1941,6 +2240,7 @@ class CoChemGUI(InputManagementMixin):
                 def finish() -> None:
                     self._ingestion_busy = False
                     self.btn_sieve_inputs.disabled = False
+                    self._sync_library_geometry_use()
                 self._ui_call(finish)
         self._ingestion_worker = threading.Thread(target=sieve, daemon=True)
         self._ingestion_worker.start()
@@ -2025,7 +2325,13 @@ class CoChemGUI(InputManagementMixin):
             return
         self._ingestion_busy = True
         self.btn_build_smiles.disabled = True
+        self._sync_library_geometry_use()
         self.student_upload_status.value = '<p role="status">Resolving your molecule and constructing a force-field starting geometry…</p>'
+        def finish() -> None:
+            self._ingestion_busy = False
+            self.btn_build_smiles.disabled = False
+            self._sync_library_geometry_use()
+
         def build() -> None:
             try:
                 from cochem_base.config_loader import get_artifact_dir
@@ -2040,31 +2346,48 @@ class CoChemGUI(InputManagementMixin):
                     raise ValueError('Generated coordinates disagree with their canonical provenance')
                 receipt = ingest_uploaded_file('generated-starting-geometry.xyz', raw, artifact_dir=get_artifact_dir(), kind='molecular')
                 snapshot = self._read_input_library()
-                def success() -> None:
-                    self._input_library_refresh_serial += 1
-                    self._apply_input_library(snapshot)
-                    self.input_library_choice.value = receipt['input_id']
-                    self.charge_input.value = provenance['charge']
-                    self._use_library_geometry()
-                    record = self._student_uploads.get(self.student_geometry_choice.value)
-                    if record:
-                        record['generation_provenance'] = {'path': str(sidecar), 'sha256': hashlib.sha256(sidecar.read_bytes()).hexdigest(),
-                            'query': query, 'resolution_source': provenance['resolution_source'], 'quantum_optimized': False}
-                        Path(record['path']).parent.joinpath('input-manifest.json').write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
-                    self.student_upload_status.value += ('<p role="status">Generated starting geometry only. ' +
-                        html.escape(str(provenance['forcefield'])) + '; molecular identity source: ' +
-                        html.escape(str(provenance['resolution_source'])) +
-                        '. Confirm spin multiplicity before calculation; atom radical flags do not define coupled molecular spin. No quantum minimum or energy is claimed.</p>')
-                self._ui_call(success)
             except (ImportError, ValueError, RuntimeError, OSError, KeyError) as exc:
                 message = str(exc)
-                self._ui_call(lambda: setattr(self.student_upload_status, 'value',
-                    '<p role="alert">Starting geometry was not generated: ' + html.escape(message) + '</p>'))
-            finally:
-                def finish() -> None:
-                    self._ingestion_busy = False
-                    self.btn_build_smiles.disabled = False
+                def failed() -> None:
+                    try:
+                        self.student_upload_status.value = (
+                            '<p role="alert">Starting geometry was not generated: ' + html.escape(message) + '</p>')
+                    finally:
+                        finish()
+                self._ui_call(failed)
+                return
+            except BaseException:
                 self._ui_call(finish)
+                raise
+            else:
+                def success() -> None:
+                    try:
+                        self._input_library_refresh_serial += 1
+                        self._apply_input_library(snapshot)
+                        self.input_library_choice.value = receipt['input_id']
+                        self.charge_input.value = provenance['charge']
+                        # Intake and exact receipt selection are complete. Keep
+                        # release, promotion and cleanup in one UI callback so
+                        # no later builder cleanup can clear a new upload's busy state.
+                        generation_link = {'path': str(sidecar), 'sha256': hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+                            'query': query, 'resolution_source': provenance['resolution_source'], 'quantum_optimized': False}
+                        self._generated_input_provenance[receipt['input_id']] = json.dumps(generation_link, sort_keys=True)
+                        self._ingestion_busy = False
+                        self._sync_library_geometry_use()
+                        self._use_library_geometry()
+                        record = self._student_uploads.get(self.student_geometry_choice.value)
+                        if not record or record.get('source_input_id') != receipt['input_id']:
+                            raise ValueError('The generated starting geometry was not selected; its original is retained')
+                        self.student_upload_status.value += ('<p role="status">Generated starting geometry only. ' +
+                            html.escape(str(provenance['forcefield'])) + '; molecular identity source: ' +
+                            html.escape(str(provenance['resolution_source'])) +
+                            '. Confirm spin multiplicity before calculation; atom radical flags do not define coupled molecular spin. No quantum minimum or energy is claimed.</p>')
+                    except (ImportError, ValueError, RuntimeError, OSError, KeyError) as exc:
+                        self.student_upload_status.value = (
+                            '<p role="alert">Starting geometry was not selected: ' + html.escape(str(exc)) + '</p>')
+                    finally:
+                        finish()
+                self._ui_call(success)
         self._ingestion_worker = threading.Thread(target=build, daemon=True)
         self._ingestion_worker.start()
 
@@ -2120,9 +2443,12 @@ class CoChemGUI(InputManagementMixin):
         self.btn_setup_apply.disabled = self._student_setup_busy or not bool(plan.get("status") == "updates_available" or
             plan.get("updates") or plan.get("available") or plan.get("compatible_updates"))
         if plan:
+            update_status = str(plan.get('status', 'complete'))
             self.student_setup_status.value += (
-                f"<p role='status'>Update check: {html.escape(str(plan.get('status', 'complete')))}. "
+                f"<p role='status'>Update check: {html.escape(progress_label(update_status))}. "
                 "Apply compatible updates checks approved published revisions and preserves your research data.</p>"
+                "<details><summary>Update check details</summary><p>Recorded status: "
+                f"<code>{html.escape(update_status)}</code></p></details>"
             )
         self._student_setup_observation = status
 
@@ -2135,7 +2461,7 @@ class CoChemGUI(InputManagementMixin):
                 from cochem_base.interfaces.student_setup import StudentSetupService
                 self._setup_service = StudentSetupService(artifact_dir=get_artifact_dir(), repository_root=_REPO_ROOT,
                     idle_check=lambda: not (
-                    self._pipeline_running or self._topos_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_retrieving or self._remote_probe_running or self._ingestion_busy))
+                    self._pipeline_running or self._topos_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._actions_retrieving or self._remote_probe_running or self._ingestion_busy or self._local_file_work_active()))
                 status = self._setup_service.status()
                 self._ui_call(lambda: self._render_student_setup_status(status))
                 automatic = os.environ.get("COCHEM_STUDENT_AUTO_SETUP", "").lower()
@@ -2152,7 +2478,7 @@ class CoChemGUI(InputManagementMixin):
     def _student_setup_action(self, action: str) -> None:
         if self._student_setup_busy:
             return
-        if self._pipeline_running or self._topos_running or self._actions_running:
+        if self._pipeline_running or self._topos_running or self._actions_running or self._actions_state_operation is not None:
             self.student_setup_status.value = "<p role='alert'>Wait for the running calculation to finish or cancel it before changing CoChem installations.</p>"
             return
         self._student_setup_busy = True
@@ -2180,7 +2506,7 @@ class CoChemGUI(InputManagementMixin):
                     from cochem_base.interfaces.student_setup import StudentSetupService
                     self._setup_service = StudentSetupService(artifact_dir=get_artifact_dir(), repository_root=_REPO_ROOT,
                         idle_check=lambda: not (
-                        self._pipeline_running or self._topos_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_retrieving or self._remote_probe_running or self._ingestion_busy))
+                        self._pipeline_running or self._topos_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._actions_retrieving or self._remote_probe_running or self._ingestion_busy or self._local_file_work_active()))
                 receipt = getattr(self._setup_service, action)()
                 status = self._setup_service.status()
                 if action == "check_updates" and isinstance(receipt, dict):
@@ -2414,6 +2740,16 @@ class CoChemGUI(InputManagementMixin):
                 records[key] = record
             except (ValueError, KeyError, TypeError, UnicodeError, OSError):
                 continue
+        for record in records.values():
+            source_id = record.get("source_input_id")
+            if source_id and "generation_provenance" in record:
+                try:
+                    known = json.dumps(record["generation_provenance"], sort_keys=True, allow_nan=False)
+                except (ValueError, TypeError):
+                    known = json.dumps({"unavailable": "Stored construction metadata is invalid"})
+                previous = self._generated_input_provenance.get(source_id)
+                self._generated_input_provenance[source_id] = known if previous in (None, known) else json.dumps(
+                    {"unavailable": "Stored construction associations conflict"})
         records = self._active_geometry_records(records)
         self._student_uploads = records
         self._sync_input_management()
@@ -2858,13 +3194,16 @@ class CoChemGUI(InputManagementMixin):
         self.research_populations = widgets.Checkbox(value=False, description="Include minimum-based population model")
         self.research_isomer_choices = widgets.SelectMultiple(options=[], description="Calculated structures:",
             style={'description_width': 'initial'}, layout=widgets.Layout(width='95%', height='130px'))
-        self.btn_research_compare = widgets.Button(description="Compare calculated isomers", disabled=True)
+        self.btn_research_compare = widgets.Button(description="Compare calculated structures", disabled=True)
         self.btn_research_compare.on_click(self._compare_student_isomers)
-        self.research_report_output = widgets.HTML("<p role='status'>No calculation results yet. Run a calculation to see its energy tables and available diagrams here.</p>")
+        self.research_report_output = widgets.HTML("<p role='status'>No tables or diagrams have been collected here yet.</p>")
         self.research_report_download = widgets.HTML()
         advanced = _collapsed_section("Advanced: module installation and data transfer", self.view_modules)
         advanced.selected_index = None
         self.view_modules = build_results_panel(self, advanced)
+        self.research_topos_engine.observe(lambda change: self._refresh_execution_gate(), names='value')
+        self.research_matrix_recipe.observe(lambda change: self._refresh_execution_gate(), names='value')
+        self.research_topos_operation.observe(lambda change: self._refresh_execution_gate(), names='value')
         self._refresh_research_capabilities()
 
     def _refresh_research_capabilities(self, b: Any = None) -> None:
@@ -2884,12 +3223,12 @@ class CoChemGUI(InputManagementMixin):
                     options = [(labels[operation], operation) for operation in available.get("operations", []) if operation in labels]
                     self.research_topos_operation.options = options or [("Finish TOPOS setup first", "")]
                     self.research_topos_operation.disabled = not options
-                    self.btn_research_topos.disabled = not options or self._actions_running or self._pipeline_running
+                    self.btn_research_topos.disabled = not options or self._actions_running or self._actions_state_operation is not None or self._pipeline_running
                     torq = self._research_capability_observations.get("torq", {})
-                    self.btn_research_torq.disabled = "research_scan" not in torq.get("operations", []) or self._actions_running or self._pipeline_running
-                    self.btn_research_wiberg.disabled = "wiberg_lowdin" not in torq.get("operations", []) or self._actions_running or self._pipeline_running
-                    self.btn_research_nbo.disabled = "nbo_analysis" not in torq.get("operations", []) or self._actions_running or self._pipeline_running
-                    self.btn_research_wiberg_nao.disabled = "wiberg_nao" not in torq.get("operations", []) or self._actions_running or self._pipeline_running
+                    self.btn_research_torq.disabled = "research_scan" not in torq.get("operations", []) or self._actions_running or self._actions_state_operation is not None or self._pipeline_running
+                    self.btn_research_wiberg.disabled = "wiberg_lowdin" not in torq.get("operations", []) or self._actions_running or self._actions_state_operation is not None or self._pipeline_running
+                    self.btn_research_nbo.disabled = "nbo_analysis" not in torq.get("operations", []) or self._actions_running or self._actions_state_operation is not None or self._pipeline_running
+                    self.btn_research_wiberg_nao.disabled = "wiberg_nao" not in torq.get("operations", []) or self._actions_running or self._actions_state_operation is not None or self._pipeline_running
                     definitions = torq.get("provider_capabilities", {}).get("scientific_apis", {})
                     reasons = {name: item.get("reason", item.get("scope", "No installed provider"))
                                for name, item in definitions.items() if isinstance(item, dict) and not item.get("available")}
@@ -2917,16 +3256,20 @@ class CoChemGUI(InputManagementMixin):
         if orca_ready:
             options.append(("ORCA r2SCAN-3c", "orca"))
         previous = self.research_topos_engine.value
+        if previous not in dict(options).values():
+            options.insert(0, ("Choose an available research method", None))
         self.research_topos_engine.options = options
-        self.research_topos_engine.value = previous if previous in dict(options).values() else "xtb"
+        self.research_topos_engine.value = previous if previous in dict(options).values() else None
         from cochem_base.interfaces.student_research import student_matrix_recipes
         recipes = student_matrix_recipes(capabilities=list(self._research_capability_observations.values()))
         self._student_matrix_recipes = {item['row_id']: item for item in recipes if item['engine'] != 'orca' or orca_ready}
         choices = [(f"{row}: {item['method']} / {item['basis'] or 'built in'}", row)
                    for row, item in self._student_matrix_recipes.items()]
         current = self.research_matrix_recipe.value
+        if current not in self._student_matrix_recipes and choices:
+            choices.insert(0, ("Choose an available optimization recipe", ""))
         self.research_matrix_recipe.options = choices or [("No verified molecule-only recipe", "")]
-        self.research_matrix_recipe.value = current if current in self._student_matrix_recipes else (choices[0][1] if choices else '')
+        self.research_matrix_recipe.value = current if current in self._student_matrix_recipes else ''
         self.research_matrix_recipe.disabled = not choices
 
     def _refresh_orbital_backend_choices(self) -> None:
@@ -2946,8 +3289,10 @@ class CoChemGUI(InputManagementMixin):
             engines.discard('orca')
         choices = [(engine.upper(), engine) for engine in sorted(engines)]
         previous = self.research_orbital_backend.value
+        if choices and previous not in engines:
+            choices.insert(0, ('Choose an available orbital backend', None))
         self.research_orbital_backend.options = choices or [('No verified orbital backend', None)]
-        self.research_orbital_backend.value = previous if previous in engines else (choices[0][1] if choices else None)
+        self.research_orbital_backend.value = previous if previous in engines else None
         self.research_orbital_backend.disabled = not choices
 
     def _student_fragment_groups(self) -> list[list[int]]:
@@ -2995,6 +3340,8 @@ class CoChemGUI(InputManagementMixin):
             if operation not in self._research_capability_observations.get("topos", {}).get("operations", []):
                 raise ValueError("This TOPOS calculation is unavailable. Open Start here and check the module installation")
             engine = self.research_topos_engine.value
+            if operation != "matrix" and engine not in {"xtb", "orca"}:
+                raise ValueError("Choose an available research method before starting this calculation")
             fragments, states = None, None
             if operation == "association":
                 fragments = self._student_fragment_groups()
@@ -3066,9 +3413,10 @@ class CoChemGUI(InputManagementMixin):
                 if self._actions_running else f"<p role='alert'>Calculation was not submitted: {html.escape(self.state.error_message)}</p>"
             )
             return
-        if self._pipeline_running or self._topos_running or self._hpc_running or self._actions_running:
+        if self._pipeline_running or self._topos_running or self._hpc_running or self._actions_running or self._actions_state_operation is not None:
             raise ValueError("Wait for or cancel the current calculation before starting another")
-        self._pipeline_cancellation.clear()
+        self._pipeline_cancellation = threading.Event()
+        cancellation = self._pipeline_cancellation
         self._student_research_running = True
         self._pipeline_running = True
         self.btn_cancel.disabled = False
@@ -3084,7 +3432,7 @@ class CoChemGUI(InputManagementMixin):
                 path.parent.mkdir(parents=True, exist_ok=False)
                 path.write_text(geometry, encoding="utf-8", newline="")
                 result = execute_provider_request(provider, root, root / "results", root=Path(self.module_root.value),
-                    cancel_event=self._pipeline_cancellation, resources={"cores": self.actions_cores.value,
+                    cancel_event=cancellation, resources={"cores": self.actions_cores.value,
                         "memory_mb": self.actions_memory.value * self.actions_cores.value, "budget_seconds": self.actions_timeout.value})
                 def success() -> None:
                     self._last_module_result = result
@@ -3135,30 +3483,61 @@ class CoChemGUI(InputManagementMixin):
         from cochem_base.interfaces.student_reports import (
             discover_observations,
             load_reports,
-            report_html,
         )
         reports = load_reports(root)
         observations = discover_observations(root)
+        self._append_student_research_records(root, reports=reports, observations=observations)
+
+    def _register_completed_local_calculation(self, execution_receipt: dict, root: Path) -> None:
+        """Add the exact final local structure without changing execution status."""
+        try:
+            from cochem_base.interfaces.student_reports import observation_from_completed_local_calculation
+            observation = observation_from_completed_local_calculation(execution_receipt, results_directory=root)
+            identity = (json.dumps(observation["source"], sort_keys=True), observation["energy_kind"])
+            if any((json.dumps(item.get("source", {}), sort_keys=True), item.get("energy_kind")) == identity
+                   for item in self._research_observations):
+                return
+            number = 1 + max((item["local_calculation_number"] for item in self._research_observations
+                              if type(item.get("local_calculation_number")) is int), default=0)
+            observation = {**observation, "local_calculation_number": number,
+                "label": f"Local calculation {number} · {observation['method']['method']} · Electronic energy"}
+            self._append_student_research_records(root.parent, reports=[], observations=[observation])
+        except Exception as exc:
+            self.research_report_output.value = (
+                "<p role='alert'>The calculation completed, but its energy could not be added to calculated structures: "
+                + html.escape(str(exc)) + ". The original calculation output remains available.</p>"
+            )
+
+    def _append_student_research_records(self, root: Path, *, reports: list, observations: list) -> None:
+        from cochem_base.interfaces.student_reports import report_html
         self._research_reports.extend(reports)
         existing = {(json.dumps(item.get("source", {}), sort_keys=True), item.get("energy_kind")) for item in self._research_observations}
         for item in observations:
             key = (json.dumps(item.get("source", {}), sort_keys=True), item.get("energy_kind"))
             if key not in existing:
                 kind = "Gibbs free energy" if item.get("energy_kind") == "gibbs_free_energy" else "Electronic energy"
-                item["label"] = f"{root.name[:36]} · {item['label']} · {kind}"
-                self._research_observations.append(item)
+                label = item["label"] if type(item.get("local_calculation_number")) is int else f"{root.name[:36]} · {item['label']} · {kind}"
+                self._research_observations.append({**item, "label": label})
                 existing.add(key)
-        chosen = set(self.research_isomer_choices.value)
-        self.research_isomer_choices.options = [(item["label"], index) for index, item in enumerate(self._research_observations)]
-        self.research_isomer_choices.value = tuple(index for _, index in self.research_isomer_choices.options
-                                                   if index in chosen or not chosen)
+        self._refresh_student_research_choices()
         if reports:
             self.research_report_output.value = "\n".join(report_html(report) for report in self._research_reports)
         elif observations:
-            self.research_report_output.value = f"<p role='status'>Retained {len(self._research_observations)} computed energy observations. Choose Compare calculated isomers for compatible structures.</p>"
+            self.research_report_output.value = f"<p role='status'>Retained {len(self._research_observations)} computed energy observations. Choose Compare calculated structures for compatible structures.</p>"
         else:
             self.research_report_output.value = "<p role='status'>Calculation artifacts were retained. The provider returned no compatible scientific report observations; no diagram or population has been invented.</p>"
         self.btn_research_compare.disabled = not bool(self._research_observations)
+
+    def _set_student_research_choice_options(self, options: list, *, select_all_if_empty: bool = True) -> None:
+        chosen = self.research_isomer_choices.value
+        self.research_isomer_choices.options = options
+        self.research_isomer_choices.value = tuple(index for _, index in options
+                                                   if index in chosen or (select_all_if_empty and not chosen))
+
+    def _refresh_student_research_choices(self, *, select_all_if_empty: bool = True) -> None:
+        self._set_student_research_choice_options(
+            [(item["label"], index) for index, item in enumerate(self._research_observations)],
+            select_all_if_empty=select_all_if_empty)
 
     def _compare_student_isomers(self, b: Any = None) -> None:
         try:
@@ -3175,11 +3554,20 @@ class CoChemGUI(InputManagementMixin):
             self.research_report_output.value = report_html(report)
             paths = export_report(report, get_artifact_dir() / "StudentReports" / uuid.uuid4().hex)
             links = []
+            download_labels = {
+                "report.html": "Download readable report (HTML)",
+                "table.csv": "Download comparison table (CSV)",
+                "diagram.svg": "Download comparison diagram (SVG)",
+                "populations.svg": "Download population diagram (SVG)",
+                "report.json": "Download report data (JSON)",
+                "manifest.json": "Download file verification record (JSON)",
+            }
             for filename, path in paths.items():
                 content = Path(path).read_bytes()
                 media = "image/svg+xml" if filename.endswith(".svg") else "text/csv" if filename.endswith(".csv") else "application/json" if filename.endswith(".json") else "text/html"
                 encoded = base64.b64encode(content).decode("ascii")
-                links.append(f"<a download='{html.escape(filename)}' href='data:{media};base64,{encoded}'>Download {html.escape(filename)}</a>")
+                label = download_labels.get(filename, "Download " + filename)
+                links.append(f"<a download='{html.escape(filename)}' href='data:{media};base64,{encoded}'>{html.escape(label)}</a>")
             self.research_report_download.value = "<p>" + " · ".join(links) + "</p>"
         except (ValueError, RuntimeError, OSError) as exc:
             self.research_report_output.value = f"<p role='alert'>Scientific comparison requires complete compatible evidence: {html.escape(str(exc))}</p>"
@@ -3271,6 +3659,27 @@ class CoChemGUI(InputManagementMixin):
         except ImportError:
             return False
 
+    def _withdraw_remote_engine_access(self, target: tuple[str, str]) -> None:
+        if (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or "main") != target:
+            return
+        self._remote_engine_target = target
+        self._remote_engine_availability = {engine: {"status": "unknown", "provisionable": False,
+            "reason": "A fresh archive-access check has not succeeded for this project and branch."}
+            for engine in ("orca", "cfour")}
+        self._refresh_engine_choices()
+        self._refresh_research_engine_choices()
+        self._refresh_orbital_backend_choices()
+        self._refresh_execution_gate()
+
+    def _render_remote_engine_check_failure(self, target: tuple[str, str], message: str,
+                                            setup_link: str = "") -> None:
+        if (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or "main") != target:
+            return
+        self.remote_engine_status.value = (
+            f"<p role='alert'>ORCA/CFOUR access could not be checked: {html.escape(message)}</p>"
+            + setup_link + "<p>Open <b>Setup help</b> below for the next steps, then select <b>Check ORCA &amp; CFOUR</b> to retry. "
+            "Dependent choices remain unavailable until access is verified. You can still upload files and use available free programs.</p>")
+
     def _check_remote_engines(self, b: Any = None) -> None:
         if self._remote_probe_running or self.calc_env_dropdown.value != "github-actions":
             return
@@ -3282,7 +3691,12 @@ class CoChemGUI(InputManagementMixin):
             self.remote_engine_status.value = f"<p role='status'>Open Project details and check the GitHub repository name: {html.escape(str(exc))}</p>"
             return
         self._remote_probe_running = True
+        stop_context = self._new_remote_stop("remote_probe")
+        self._refresh_running_jobs()
         self._remote_probe_submission = None
+        # Rechecking access withdraws the previous observation immediately.
+        # A failed or timed-out check cannot leave stale licensed choices live.
+        self._withdraw_remote_engine_access(probe_target)
         self.btn_remote_engine_check.disabled = True
         self.btn_remote_engine_cancel.disabled = True
         self.remote_engine_status.value = "<p role='status' aria-live='polite'>Checking this project and its ORCA/CFOUR downloads on GitHub Actions. This can take a few minutes. You can continue uploading research files.</p>"
@@ -3291,35 +3705,32 @@ class CoChemGUI(InputManagementMixin):
                 from cochem_base.config_loader import get_artifact_dir
                 from cochem_base.interfaces.student_actions import StudentActionsClient
                 artifacts = get_artifact_dir()
-                client = StudentActionsClient(repository, branch=branch,
-                    repository_root=Path(os.environ.get("COCHEM_ASSIGNMENT_ROOT", str(_REPO_ROOT))), artifact_dir=artifacts)
-                self._remote_probe_client = client
-                pending = []
-                cache = artifacts / 'StudentActions' / 'submissions'
-                if cache.is_dir() and not cache.is_symlink():
-                    for path in cache.glob('*.json'):
-                        try:
-                            if path.is_symlink() or path.stat().st_size > 64 * 1024:
+                if stop_context['submission'] is not None:
+                    client = stop_context['client']
+                    submission = dict(stop_context['submission'])
+                else:
+                    client = StudentActionsClient(repository, branch=branch,
+                        repository_root=Path(os.environ.get("COCHEM_ASSIGNMENT_ROOT", str(_REPO_ROOT))), artifact_dir=artifacts)
+                    pending = []
+                    cache = artifacts / 'StudentActions' / 'submissions'
+                    if cache.is_dir() and not cache.is_symlink():
+                        for path in cache.glob('*.json'):
+                            try:
+                                if path.is_symlink() or path.stat().st_size > 64 * 1024:
+                                    continue
+                                cached = json.loads(path.read_text(encoding='utf-8'))
+                                if cached.get('request_kind') == 'capability_probe' and (cached.get('repository'), cached.get('branch')) == probe_target and cached.get('status') not in {'completed', 'rejected'}:
+                                    pending.append((path.stat().st_mtime, cached))
+                            except (ValueError, OSError, TypeError):
                                 continue
-                            cached = json.loads(path.read_text(encoding='utf-8'))
-                            if cached.get('request_kind') == 'capability_probe' and (cached.get('repository'), cached.get('branch')) == probe_target and cached.get('status') not in {'completed', 'rejected'}:
-                                pending.append((path.stat().st_mtime, cached))
-                        except (ValueError, OSError, TypeError):
-                            continue
-                submission = max(pending, key=lambda item: item[0])[1] if pending else client.check_engines(engines=["orca", "cfour"])
+                    if stop_context['requested'] and not pending:
+                        raise RuntimeError('Engine check stopped before submission; no new check was dispatched')
+                    submission = max(pending, key=lambda item: item[0])[1] if pending else client.check_engines(engines=["orca", "cfour"])
+                self._remote_probe_client = client
                 self._remote_probe_submission = submission
+                self._bind_remote_stop("remote_probe", client, submission, stop_context)
                 self._ui_call(lambda: setattr(self.btn_remote_engine_cancel, 'disabled', False))
-                deadline = time.monotonic() + 20 * 60
-                while True:
-                    current = client.status(submission)
-                    submission = current
-                    self._remote_probe_submission = current
-                    if current.get("status") == "completed":
-                        break
-                    if time.monotonic() >= deadline:
-                        client.cancel(submission)
-                        raise RuntimeError("The remote engine check exceeded 20 minutes; cancellation was requested. Retry after the workflow stops.")
-                    time.sleep(3)
+                submission = self._poll_remote_engine_check(client, submission, stop_context)
                 directory = artifacts / "RemoteEngineChecks" / f"{submission['request_id']}-{uuid.uuid4().hex}"
                 receipt = client.download_results(submission, directory)
                 report = receipt["report"]
@@ -3329,6 +3740,8 @@ class CoChemGUI(InputManagementMixin):
                 if set(engines) != {"orca", "cfour"}:
                     raise ValueError("The remote engine check returned an incomplete engine inventory")
                 def success() -> None:
+                    if self._remote_stops.get("remote_probe") is not stop_context:
+                        return
                     if (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or "main") != probe_target:
                         return
                     self._remote_engine_target = probe_target
@@ -3339,42 +3752,65 @@ class CoChemGUI(InputManagementMixin):
                         + "<details><summary>Check details</summary>" + html.escape(str(item.get('reason', '')))
                         + "</details></li>" for engine, item in engines.items()) + "</ul><p>Each calculation installs and checks its selected program before running.</p>"
                     self._refresh_engine_choices()
+                    self._refresh_research_engine_choices()
+                    self._refresh_orbital_backend_choices()
                     self._refresh_research_capabilities()
                 self._ui_call(success)
             except (ValueError, RuntimeError, OSError, ImportError, AttributeError) as exc:
                 message = str(exc)
                 setup_link = _setup_check_link(getattr(exc, 'setup_url', None))
-                self._ui_call(lambda: setattr(self.remote_engine_status, "value",
-                    f"<p role='alert'>ORCA/CFOUR access could not be checked: {html.escape(message)}</p>"
-                    + setup_link + "<p>Open <b>Setup help</b> below for the next steps. You can still upload files and use available free programs.</p>"))
+                self._ui_call(lambda: self._render_remote_engine_check_failure(probe_target, message, setup_link)
+                    if self._remote_stops.get('remote_probe') is stop_context else None)
             finally:
-                def finished() -> None:
-                    self._remote_probe_running = False
-                    self.btn_remote_engine_check.disabled = False
-                    self.btn_remote_engine_cancel.disabled = True
-                    if (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or "main") != probe_target and self._automatic_remote_checks_enabled():
-                        self._check_remote_engines()
-                self._ui_call(finished)
+                self._ui_call(lambda: self._finish_remote_engine_check(stop_context, probe_target))
+        stop_context['monitor'] = check
         self._remote_probe_worker = threading.Thread(target=check, daemon=True)
         self._remote_probe_worker.start()
 
-    def _cancel_remote_engine_check(self, b: Any = None) -> None:
-        if not self._remote_probe_running or self._remote_probe_client is None or self._remote_probe_submission is None:
+    def _poll_remote_engine_check(self, client: Any, submission: dict[str, Any],
+                                  context: dict[str, Any]) -> dict[str, Any]:
+        deadline = context.setdefault('deadline', time.monotonic() + 20 * 60)
+        while self._remote_stops.get('remote_probe') is context:
+            current = client.status(submission)
+            submission = current
+            self._remote_probe_submission = current
+            self._bind_remote_stop('remote_probe', client, current, context)
+            if current.get('status') in {'completed', 'rejected'}:
+                return current
+            if time.monotonic() >= deadline:
+                context['requested'] = True
+                self._send_remote_stop('remote_probe', context)
+                raise RuntimeError('The 20-minute monitoring limit was reached. This check remains tracked until its stop is confirmed; use Cancel check to retry or refresh.')
+            time.sleep(3)
+        raise RuntimeError('This engine-check monitor was superseded by another owned context')
+
+    def _finish_remote_engine_check(self, context: dict[str, Any], target: tuple[str, str]) -> None:
+        if self._remote_stops.get('remote_probe') is not context:
             return
-        self.btn_remote_engine_cancel.disabled = True
-        def cancel() -> None:
-            try:
-                self._remote_probe_client.cancel(dict(self._remote_probe_submission))
-                self._ui_call(lambda: setattr(self.remote_engine_status, 'value', '<p role="status">Remote engine check cancellation requested. BASE waits for GitHub confirmation; free engines remain available.</p>'))
-            except (ValueError, RuntimeError, OSError) as exc:
-                message = str(exc)
-                self._ui_call(lambda: setattr(self.remote_engine_status, 'value', f'<p role="alert">Engine check cancellation could not be confirmed: {html.escape(message)}.</p>'))
-        self._remote_probe_cancel_worker = threading.Thread(target=cancel, daemon=True)
-        self._remote_probe_cancel_worker.start()
+        saved = context['submission']
+        pending = saved is not None and saved.get('status') not in {'completed', 'rejected'}
+        self._remote_probe_running = pending
+        self.btn_remote_engine_check.disabled = pending
+        self.btn_remote_engine_cancel.disabled = not pending
+        if pending:
+            context['retry_required'] = True
+            context['message'] = context['message'] or 'monitoring paused; the owned check remains tracked'
+            self.remote_engine_status.value += '<p role="status">This submitted engine check has no confirmed final outcome. Cancel check or Stop running jobs retries its owned stop and monitoring; do not submit a duplicate.</p>'
+        self._refresh_running_jobs()
+        if (not pending and not context['requested']
+                and (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or 'main') != target
+                and self._automatic_remote_checks_enabled()):
+            self._check_remote_engines()
+
+    def _cancel_remote_engine_check(self, b: Any = None) -> None:
+        self._request_remote_stop('remote_probe')
 
     def _refresh_actions_guidance(self, change: Any = None) -> None:
         repository = self.gh_repo_input.value.strip()
         target = (repository, self.gh_branch_input.value.strip() or "main")
+        if getattr(self, '_actions_admission_checked', None) != target:
+            self._actions_admission_checked = None
+            self._actions_admission_generation += 1
         if self._remote_engine_target != target:
             self._remote_engine_availability = {engine: {"status": "unknown", "provisionable": False,
                 "reason": "Archive access has not been verified for this assignment repository and branch."}
@@ -3392,7 +3828,7 @@ class CoChemGUI(InputManagementMixin):
             "<details><summary>How a GitHub Actions calculation works</summary>"
             "<ol><li>Upload research inputs under <b>Your files</b>.</li>"
             "<li>Open <b>Calculations</b>, select your inputs, charge, multiplicity and method.</li>"
-            "<li>Select <b>Run on GitHub Actions</b>. This sends the job to a separate GitHub computer.</li>"
+            "<li>Select <b>Check saved project request</b>. If a calculation is already active, refresh that original request. Otherwise select <b>Run on GitHub Actions</b> to send the selected draft to a separate GitHub computer.</li>"
             "<li>When it finishes, select <b>Retrieve and inspect results</b>.</li></ol>"
             "<p>The project uses a tested CoChem software version selected by your instructor or BASE's published release. "
             "Older messages called this <em>course approval</em>. It is a software-version check, not approval of your chemistry or your assignment.</p>"
@@ -3551,6 +3987,8 @@ class CoChemGUI(InputManagementMixin):
             self.periodic_structure_status.value += f"<p role='alert'>Periodic request was not saved: {html.escape(str(exc))}</p>"
 
     def _execute_periodic_pipeline(self, b: Any = None) -> None:
+        if self._actions_state_operation is not None:
+            return
         if self.calc_env_dropdown.value == "hpc":
             try:
                 target = self._prepare_periodic_config()
@@ -3586,7 +4024,7 @@ class CoChemGUI(InputManagementMixin):
             except (ValueError, OSError, RuntimeError, KeyError) as exc:
                 self.state.error_message = str(exc)
             return
-        if self._pipeline_running or self._hpc_running or self._topos_running or self._installation_running:
+        if self._pipeline_running or self._hpc_running or self._actions_running or self._actions_state_operation is not None or self._topos_running or self._installation_running:
             self.state.error_message = "Wait for the active operation before starting a periodic calculation"
             return
         try:
@@ -3594,7 +4032,7 @@ class CoChemGUI(InputManagementMixin):
         except (ValueError, OSError, RuntimeError) as exc:
             self.state.error_message = str(exc)
             return
-        self._pipeline_cancellation.clear()
+        self._pipeline_cancellation = threading.Event()
         self._pipeline_running = True
         self.btn_periodic_run.disabled = True
         self.btn_periodic_cancel.disabled = False
@@ -3604,6 +4042,7 @@ class CoChemGUI(InputManagementMixin):
         self.calculation_result.value = "<p role='status'>Periodic calculation is running.</p>"
         self._pipeline_worker = threading.Thread(target=self._pipeline_thread, args=(target,), daemon=True)
         self._pipeline_worker.start()
+        self._refresh_running_jobs()
 
     def _refresh_module_capabilities(self, b: Any = None) -> None:
         from cochem_base.interfaces.module_execution import installed_module_status
@@ -3661,7 +4100,11 @@ class CoChemGUI(InputManagementMixin):
         import uuid
 
         from cochem_base.interfaces.artifact_handoff import prepare_module_handoff
-        from cochem_base.interfaces.module_execution import execute_module_handoff
+        from cochem_base.interfaces.module_execution import ModuleOperationCancelled, execute_module_handoff
+        from cochem_base.core_engine.cochem_core_subprocess_broker import SubprocessCancelledError
+        if self._pipeline_running or self._topos_running or self._hpc_running or self._actions_running or self._actions_state_operation is not None or self._installation_running:
+            self.module_handoff_status.value = "<p role='alert'>Wait for or cancel the active calculation before starting geometry analysis.</p>"
+            return
         name = self.module_recipient.value
         artifact = self.module_artifact.value
         if self.calc_env_dropdown.value in {"hpc", "github-actions"}:
@@ -3678,23 +4121,41 @@ class CoChemGUI(InputManagementMixin):
         destination = Path(self.module_output.value).expanduser() / f"execution_{uuid.uuid4().hex}"
         root = Path(self.module_root.value).expanduser()
         self.btn_module_run.disabled = True
-        self.module_handoff_status.value = "<p role='status'>Running geometry analysis…</p>"
+        self.module_handoff_status.value = "<p role='status'>Running geometry analysis. A stop request waits for the current bounded installation check before stopping owned execution.</p>"
+        self._pipeline_cancellation = threading.Event()
+        cancellation = self._pipeline_cancellation
+        self._pipeline_running = True
+        self.btn_cancel.disabled = False
+        self._refresh_execution_gate()
 
         def run() -> None:
             try:
+                if cancellation.is_set():
+                    raise ModuleOperationCancelled('Stopped before preparing the geometry handoff')
                 prepare_module_handoff(name, artifact, destination / 'handoff', operation='geometry_analysis')
-                result = execute_module_handoff(destination / 'handoff/handoff.json', destination / 'result', root=root)
+                if cancellation.is_set():
+                    raise ModuleOperationCancelled('Stopped after preserving the handoff, before module execution')
+                result = execute_module_handoff(destination / 'handoff/handoff.json', destination / 'result', root=root,
+                                                cancel_event=cancellation)
+                if result.get('status') != 'completed' or result.get('operation_performed') is not True:
+                    raise RuntimeError('Geometry analysis did not complete; retain its diagnostics without accepting a result')
                 self._last_module_result = result
                 self.module_handoff_status.value = (
                     f"<p role='status'>Geometry analysis completed for {html.escape(name)}.</p>"
                     f"<p>{html.escape(result['scope'])}</p><p>Result: <code>{html.escape(str(destination / 'result/result.json'))}</code></p>"
                     f"<pre>{html.escape(json.dumps(result['operation_report'], indent=2, allow_nan=False))}</pre>")
+            except (ModuleOperationCancelled, SubprocessCancelledError) as exc:
+                self.module_handoff_status.value = f"<p role='status'>Geometry analysis cancelled. Its owned execution stopped; partial diagnostics remain: {html.escape(str(destination))}. {html.escape(str(exc))}</p>"
             except Exception as exc:
                 self.module_handoff_status.value = f"<p role='alert'>Module operation failed: {html.escape(str(exc))}</p>"
             finally:
-                self.btn_module_run.disabled = False
-        self._module_worker = threading.Thread(target=run, daemon=True)
-        self._module_worker.start()
+                if self._pipeline_cancellation is cancellation:
+                    self._pipeline_running = False
+                    self.btn_module_run.disabled = False
+                    self.btn_cancel.disabled = True
+                    self._ui_call(self._refresh_execution_gate)
+        self._module_geometry_worker = threading.Thread(target=run, daemon=True)
+        self._module_geometry_worker.start()
 
     def _prepare_module_handoff(self, b: Any = None) -> None:
         import base64
@@ -3761,6 +4222,15 @@ class CoChemGUI(InputManagementMixin):
                 guidance = str(err)
         else:
             guidance = str(err)
+            # Only an explicitly marked diagnostic block can be moved out of
+            # plain errors. Ordinary multiline recovery instructions stay visible.
+            diagnostic_start = re.search(r"(?m)^(?:Traceback \(most recent call last\):|Technical diagnostics:)", guidance)
+            if diagnostic_start is not None:
+                guidance = guidance[:diagnostic_start.start()].strip()
+                guidance = (guidance + " " if guidance else "The operation could not be completed. ") + (
+                    "Open Full problem details for the diagnostic record. Keep the original input and "
+                    "calculation output before starting a separate corrected run."
+                )
 
         if hasattr(err, "to_diagnostic_telemetry"):
             try:
@@ -3769,15 +4239,15 @@ class CoChemGUI(InputManagementMixin):
                 telemetry = None
 
         safe_guidance = html.escape(str(guidance))
-        lines = str(guidance).splitlines()
-        first_line = lines[0] if lines else str(guidance)
-        # Keep complete sentences and the actionable next step; never cut a
-        # recovery instruction at an arbitrary character boundary.
-        first_sentence = first_line.split('. ', 1)[0].rstrip('.') + '.'
-        next_step = str(guidance).partition('Next step: ')[2].split('. ', 1)[0]
-        summary = first_sentence + (' Next step: ' + next_step.rstrip('.') + '.' if next_step else '')
+        # Recovery instructions and scientific cautions belong in the visible
+        # guidance. Sentence guessing can hide them even in a short message.
+        details = (
+            '<details><summary>Full problem details</summary><pre>'
+            + html.escape(str(err)) + '</pre></details>'
+            if str(guidance) != str(err) else ''
+        )
         self.footer_message.value = (f'<div role="alert" class="cochem-error">'
-            f'<p>{html.escape(summary)}</p><details><summary>Full problem details</summary><p>{safe_guidance}</p></details></div>')
+            f'<p>{safe_guidance}</p>{details}</div>')
 
         if hasattr(self, 'telemetry_accordion') and hasattr(self, 'telemetry_html'):
             if telemetry:
@@ -4034,8 +4504,11 @@ class CoChemGUI(InputManagementMixin):
 
     def _refresh_execution_gate(self) -> None:
         from cochem_base.core_engine.execution_authority import authorize_engine_execution
+        self._refresh_running_jobs()
         reason = ""
         remote = self.calc_env_dropdown.value == "github-actions"
+        admission_reason = ("Select Check saved project request before starting a new GitHub calculation. Your structure and settings are kept."
+            if remote and self._actions_admission_checked != (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or "main") else "")
         if remote:
             self.btn_execute.description = "Run on GitHub Actions"
             if self.matrix_engine.value not in {"ORCA", "CFOUR", "XTB"}:
@@ -4063,8 +4536,21 @@ class CoChemGUI(InputManagementMixin):
                     # controls enabled until the next installation refresh.
                     self._refresh_engine_choices()
                     return
+        self.xtb_task_controls.layout.display = "" if self.matrix_engine.value == "XTB" else "none"
+        remote_xtb = self.calc_env_dropdown.value in {"github-actions", "hpc"}
+        self.xtb_task_controls.children[1].value = (
+            "<p class='cochem-hint'>This calculation computer supports xTB geometry optimization only. "
+            "If your assignment calls for optimization, choose <b>Optimize the geometry</b> here. "
+            "For a single point, select a prepared local calculation computer. Your task is not changed automatically. "
+            "Optimization alone does not prove that a structure is a minimum.</p>"
+            if remote_xtb else
+            "<p class='cochem-hint'>Calculating energy keeps the supplied coordinates fixed. "
+            "Optimizing lets the atoms move. Neither task proves that a structure is a minimum.</p>")
+        self.xtb_task.disabled = bool(self._pipeline_running or self._hpc_running or self._hpc_retrieving
+                                      or self._actions_running or self._actions_state_operation is not None or self._topos_running or self._installation_running)
+        reason = self._xtb_task_route_reason() or reason or admission_reason
         if not remote:
-            self.btn_execute.description = {"XTB": "Run xTB optimization", "PYSCF": "Run PySCF single point",
+            self.btn_execute.description = {"XTB": "Calculate energy" if self.xtb_task.value == "single_point" else "Optimize geometry", "PYSCF": "Run PySCF single point",
                                             "CFOUR": "Run CFOUR calculation", None: "Select a calculation engine"}.get(self.matrix_engine.value, "Run ORCA optimization")
         if self.calc_env_dropdown.value == "hpc":
             self.btn_execute.description = "Submit HPC calculation"
@@ -4114,20 +4600,24 @@ class CoChemGUI(InputManagementMixin):
         hpc_reason = self._student_hpc_admission_reason() if self.calc_env_dropdown.value == 'hpc' else ''
         reason = reason or hpc_reason
         self.btn_hpc_connect.disabled = self.calc_env_dropdown.value != 'hpc' or self._hpc_preflight_running
+        self.btn_hpc_open.disabled = not bool(getattr(self, '_hpc_history', {})) or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._pipeline_running or self._topos_running
         self.engine_warning.value = f"<b>{html.escape(reason)}</b>" if reason else ""
-        self.btn_execute.disabled = bool(reason or self.dispersion_warning.value or self._pipeline_running or self._hpc_running or self._hpc_retrieving or self._actions_running
+        self.btn_execute.disabled = bool(reason or self.dispersion_warning.value or self._pipeline_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None
                                          or self._topos_running or self._installation_running)
         self.btn_slurm_submit.disabled = self.calc_env_dropdown.value != 'hpc' or self.btn_execute.disabled
         if hasattr(self, 'btn_periodic_run'):
-            self.btn_periodic_run.disabled = bool(hpc_reason or self._pipeline_running or self._hpc_running or self._hpc_retrieving)
+            self.btn_periodic_run.disabled = bool(hpc_reason or admission_reason or self._pipeline_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._topos_running or self._installation_running)
         if hasattr(self, 'btn_topos_submit') and self.calc_env_dropdown.value == 'hpc':
             self.btn_topos_submit.disabled = bool(hpc_reason or not self.topos_heuristic.value or self._topos_running
-                                                or self._pipeline_running or self._hpc_running or self._installation_running)
+                                                or self._pipeline_running or self._hpc_running or self._actions_running or self._actions_state_operation is not None or self._installation_running)
         if hasattr(self, 'btn_research_topos'):
-            busy = bool(hpc_reason) or self._pipeline_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._topos_running or self._student_setup_busy
+            busy = bool(hpc_reason or admission_reason) or self._pipeline_running or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._topos_running or self._student_setup_busy
             top_ops = self._research_capability_observations.get('topos', {}).get('operations', [])
             torq_ops = self._research_capability_observations.get('torq', {}).get('operations', [])
-            self.btn_research_topos.disabled = busy or not bool(top_ops and self.research_topos_operation.value in top_ops)
+            selected_research = (self.research_matrix_recipe.value in getattr(self, '_student_matrix_recipes', {})
+                                if self.research_topos_operation.value == 'matrix'
+                                else self.research_topos_engine.value in {'xtb', 'orca'})
+            self.btn_research_topos.disabled = busy or not selected_research or not bool(top_ops and self.research_topos_operation.value in top_ops)
             for button, operation in ((self.btn_research_torq, 'research_scan'),
                                       (self.btn_research_wiberg, 'wiberg_lowdin'),
                                       (self.btn_research_wiberg_nao, 'wiberg_nao'),
@@ -4341,6 +4831,7 @@ class CoChemGUI(InputManagementMixin):
                     def finish() -> None:
                         self._ingestion_busy = False
                         self.btn_load_hessian.disabled = False
+                        self._sync_library_geometry_use()
                     self._ui_call(finish)
         if b is None:
             load()
@@ -4376,6 +4867,7 @@ class CoChemGUI(InputManagementMixin):
                 if b is not None:
                     self._ingestion_busy = False
                     self.btn_run_isotope_reanalysis.disabled = False
+                    self._sync_library_geometry_use()
             self._ui_call(publish)
 
         # Retain the synchronous programmatic API; actual Button.click passes the widget.
@@ -4534,6 +5026,7 @@ class CoChemGUI(InputManagementMixin):
                 def finish() -> None:
                     self._ingestion_busy = False
                     self.btn_read_hdf5.disabled = False
+                    self._sync_library_geometry_use()
                 self._ui_call(finish)
         self._physical_data_worker = threading.Thread(target=inspect, daemon=True)
         self._physical_data_worker.start()
@@ -4615,7 +5108,7 @@ class CoChemGUI(InputManagementMixin):
         self._topos_engines = available
         self.topos_heuristic.options = options or [("[MISSING DATA] No audited search engine", "")]
         self.topos_heuristic.disabled = not options
-        self.btn_topos_submit.disabled = not options or getattr(self, '_pipeline_running', False) or self._installation_running
+        self.btn_topos_submit.disabled = not options or self._pipeline_running or self._hpc_running or self._actions_running or self._actions_state_operation is not None or self._topos_running or self._installation_running
         if self.calc_env_dropdown.value == 'hpc':
             self.btn_topos_submit.disabled = self.btn_topos_submit.disabled or bool(self._student_hpc_admission_reason())
         self.topos_capabilities.value = (
@@ -4632,6 +5125,8 @@ class CoChemGUI(InputManagementMixin):
                 logger.exception("Could not stop owned TOPOS search during kernel shutdown")
 
     def _start_topos_search(self, b: Any = None) -> None:
+        if self._actions_state_operation is not None:
+            return
         import uuid
 
         from cochem_base.calc.calculation_service import parse_run_geometry_identity
@@ -4663,7 +5158,7 @@ class CoChemGUI(InputManagementMixin):
             self.topos_status.value = "<p role='alert'>Use the integrated TOPOS research panel to submit an approved search on Actions. This native screening request was not started.</p>"
             return
         try:
-            if self._pipeline_running or self._hpc_running or self._installation_running:
+            if self._pipeline_running or self._hpc_running or self._actions_running or self._actions_state_operation is not None or self._installation_running:
                 raise ValueError("Wait for the active operation before starting another calculation")
             identity = parse_run_geometry_identity(self.matrix_geometry.value)
             symbols, coordinates = list(identity.nuclides), identity.coordinates_angstrom
@@ -4691,7 +5186,8 @@ class CoChemGUI(InputManagementMixin):
             )
             self._topos_job_id = broker.launch_search(config)
             self._topos_broker = broker
-            self._topos_cancellation.clear()
+            self._topos_cancellation = threading.Event()
+            self._topos_attention = False
             self._topos_running = True
             self.state.system_status = "TOPOS RUNNING"
             self._refresh_execution_gate()
@@ -4706,9 +5202,11 @@ class CoChemGUI(InputManagementMixin):
 
     def _poll_topos_search(self) -> None:
         broker, job = self._topos_broker, self._topos_job_id
+        cancellation = self._topos_cancellation
+        unknown = False
         try:
             while True:
-                if self._topos_cancellation.is_set():
+                if cancellation.is_set():
                     broker.cancel_search(job)
                 data = broker.poll_telemetry(job)
                 status = data["status"]
@@ -4726,18 +5224,30 @@ class CoChemGUI(InputManagementMixin):
                         self.topos_status.value += f"<p role='alert'>{html.escape(str(data.get('error')))}</p>"
                     self.btn_topos_promote.disabled = status != "COMPLETED"
                     break
-                self._topos_cancellation.wait(0.25)
-        except (ValueError, RuntimeError, OSError) as exc:
+                cancellation.wait(0.25)
+        except Exception as exc:
             self.topos_status.value = f"<p role='alert'>Conformer monitoring failed: {html.escape(str(exc))}</p>"
             try:
                 broker.cancel_search(job)
-            except (ValueError, RuntimeError, OSError):
+            except Exception:
                 logger.exception("Failed to stop owned conformer job %s", job)
+                process = broker.active_processes.get(job)
+                unknown = process is None or process.poll() is None
+                if unknown:
+                    self.topos_status.value += "<p role='alert'>Stop could not be confirmed. The owned job remains tracked; select Cancel conformer search or Stop running jobs to retry.</p>"
         finally:
-            self._topos_running = False
-            self.btn_topos_cancel.disabled = True
-            self._refresh_topos_capabilities()
-            self._refresh_execution_gate()
+            if self._topos_broker is broker and self._topos_job_id == job:
+                process = broker.active_processes.get(job)
+                if process is not None and process.poll() is None:
+                    unknown = True
+                    self.topos_status.value += "<p role='alert'>The owned search has not exited. Stop is not confirmed; wait or retry cancellation.</p>"
+                self._topos_running = unknown
+                self._topos_attention = unknown
+                self.btn_topos_cancel.disabled = not unknown
+                if unknown:
+                    self.btn_topos_promote.disabled = True
+                self._refresh_topos_capabilities()
+                self._refresh_execution_gate()
 
     def _promote_topos_search(self, b: Any = None) -> None:
         import base64
@@ -4865,10 +5375,22 @@ class CoChemGUI(InputManagementMixin):
             raise MethodologyViolationError(f"CFOUR {capability.operation} is unavailable: {capability.reason}")
         return config.model_dump(mode='json')
 
+    def _xtb_task_route_reason(self) -> str:
+        if (self.matrix_engine.value == "XTB" and self.xtb_task.value == "single_point"
+                and self.calc_env_dropdown.value in {"github-actions", "hpc"}):
+            return ("The selected single-point task is unsupported on this remote route. "
+                    "If your assignment calls for optimization, choose Optimize the geometry here. "
+                    "For a single point, select a prepared local calculation computer. "
+                    "This interface’s remote xTB routes support optimization only.")
+        return ""
+
     def _xtb_run_config(self) -> dict[str, Any]:
         from cochem_base.calc.calculation_service import CalculationMatrixConfig, parse_run_geometry
         from cochem_base.calc.xtb_execution import validate_xtb_config
         elements, _ = parse_run_geometry(self.matrix_geometry.value)
+        route_reason = self._xtb_task_route_reason()
+        if route_reason:
+            raise MethodologyViolationError(route_reason)
         if self.t9_config_path.value.strip():
             raise MethodologyViolationError("T9 recovery is configured for ORCA; clear the active-space configuration before xTB screening")
         config = CalculationMatrixConfig(
@@ -4879,7 +5401,8 @@ class CoChemGUI(InputManagementMixin):
             implicit_solvation=self.matrix_solvation.value,
             cbs_cardinal_pair=self.matrix_cbs_pair.value,
             recipe="R1" if self.cb_recipe_r1.value else ("R2" if self.cb_recipe_r2.value else None),
-            **({"is_opt": True, "is_freq": False, "timeout_seconds": float(self.actions_timeout.value)}
+            is_opt=self.xtb_task.value == "optimization", is_freq=False,
+            **({"timeout_seconds": float(self.actions_timeout.value)}
                if self.calc_env_dropdown.value == "github-actions" else {}),
         )
         validate_xtb_config(config, elements)
@@ -4959,6 +5482,8 @@ class CoChemGUI(InputManagementMixin):
             self.btn_save_matrix.disabled = False
 
     def _execute_pipeline(self, b: Any) -> None:
+        if self._actions_state_operation is not None:
+            return
         if self._pipeline_running:
             return
         if self.calc_env_dropdown.value == "hpc":
@@ -4976,16 +5501,27 @@ class CoChemGUI(InputManagementMixin):
         except Exception as exc:
             self.state.error_message = str(exc)
             return
-        self._pipeline_cancellation.clear()
+        submission = self._capture_local_submission(config_path)
+        self._local_view_generation = object()
+        view_generation = self._local_view_generation
+        self._viewed_local_record_id = None
+        self.viewed_local_calculation.value = "<p>This calculation is not in saved history yet.</p>"
+        self.local_files_download.value = ""
+        self._refresh_local_file_controls()
+        self._pipeline_cancellation = threading.Event()
         self._pipeline_running = True
+        self.xtb_task.disabled = True
         self.btn_topos_submit.disabled = True
         self.btn_execute.disabled = True
         self.btn_cancel.disabled = False
         self.state.system_status = 'Running Pipeline...'
         self.telemetry_output.clear_output()
+        self._expected_local_card_update = "<i>Calculation is running.</i>"
         self.calculation_result.value = "<i>Calculation is running.</i>"
-        self._pipeline_worker = threading.Thread(target=self._pipeline_thread, args=(config_path,), daemon=True)
+        self._expected_local_card_update = None
+        self._pipeline_worker = threading.Thread(target=self._pipeline_thread, args=(config_path, submission, view_generation), daemon=True)
         self._pipeline_worker.start()
+        self._refresh_running_jobs()
 
     def _student_original_ingestion_input(self) -> dict[str, Any] | None:
         original = self._student_uploads.get(self.student_geometry_choice.value)
@@ -5086,7 +5622,7 @@ class CoChemGUI(InputManagementMixin):
                 from cochem_base.interfaces.student_hpc import StudentHpcClient
                 client = StudentHpcClient(artifact_dir=get_artifact_dir(), module_root=module_root, registry_path=Path(binding[0]))
                 observation = client.preflight()
-            except (ImportError, ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
+            except (ImportError, ValueError, RuntimeError, OSError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
                 observation = {'ready': False, 'scheduler': None, 'reason': str(exc)}
             def publish() -> None:
                 self._hpc_preflight_running = False
@@ -5117,7 +5653,7 @@ class CoChemGUI(InputManagementMixin):
                             provider: dict[str, Any] | None = None, geometry: str | None = None,
                             native_search: dict[str, Any] | None = None) -> None:
         """Submit scientific inputs to the configured scheduler without local fallback."""
-        if self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running or self._actions_running:
+        if self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running or self._actions_running or self._actions_state_operation is not None:
             self.slurm_status_output.value = "<p role='alert'>Wait for or cancel the active calculation before submitting another scheduler job.</p>"
             return
         try:
@@ -5136,6 +5672,7 @@ class CoChemGUI(InputManagementMixin):
             self.state.error_message = str(exc)
             return
         self._hpc_running = True
+        stop_context = self._new_remote_stop("hpc")
         self._hpc_submission = None
         self._hpc_job_serial += 1
         self._hpc_monitor_stop.clear()
@@ -5157,11 +5694,14 @@ class CoChemGUI(InputManagementMixin):
                 self._ui_call(lambda: self._cache_student_hpc_preflight(preflight, binding))
                 if preflight.get('ready') is not True:
                     raise RuntimeError(preflight.get('reason', 'No configured cluster scheduler is available'))
+                if stop_context["requested"]:
+                    raise RuntimeError("Scheduler submission stopped before dispatch")
                 submission = client.submit(calculation, provider=provider, xyz_files=files,
                     resources=resources, native_search=native_search, ingestion_inputs=ingestion_inputs, periodic_inputs=periodic_inputs,
                     scientific_inputs=scientific_inputs, t9_request=t9_request)
                 self._hpc_client = client
                 self._hpc_submission = submission
+                self._bind_remote_stop("hpc", client, submission, stop_context)
                 def submitted() -> None:
                     self.btn_hpc_refresh.disabled = False
                     self.btn_hpc_cancel.disabled = False
@@ -5169,9 +5709,14 @@ class CoChemGUI(InputManagementMixin):
                     self._render_student_hpc_status(submission)
                 self._ui_call(submitted)
                 self._poll_student_hpc()
+            except StudentHpcSubmissionUnknown as exc:
+                error = exc
+                self._ui_call(lambda: self._hold_unknown_hpc_submission(client, error, stop_context))
             except (ImportError, ValueError, RuntimeError, OSError, KeyError) as exc:
                 message = str(exc)
                 def failed() -> None:
+                    if self._remote_stops.get("hpc") is not stop_context:
+                        return
                     pending = self._hpc_submission is not None and self._hpc_submission.get("status") != "completed"
                     self._hpc_running = pending
                     self.btn_slurm_submit.disabled = pending
@@ -5189,12 +5734,15 @@ class CoChemGUI(InputManagementMixin):
     def _render_student_hpc_status(self, observation: dict[str, Any]) -> None:
         if self._hpc_submission is None:
             return
+        if observation.get("request_id") not in {None, self._hpc_submission.get("request_id")}:
+            return
         for field in ("status", "conclusion"):
             if field in observation:
                 self._hpc_submission[field] = observation[field]
         state = observation.get('status', 'unknown')
         finished = state == 'completed'
-        self._hpc_running = not finished
+        self._hpc_running = not finished or self._hpc_unknown_active
+        self._bind_remote_stop('hpc', self._hpc_client, self._hpc_submission)
         self.btn_hpc_refresh.disabled = False
         self.btn_hpc_cancel.disabled = finished
         self.btn_hpc_retrieve.disabled = not finished
@@ -5213,11 +5761,13 @@ class CoChemGUI(InputManagementMixin):
         submission = dict(self._hpc_submission)
         client = self._hpc_client
         serial = self._hpc_job_serial
+        context = self._remote_stops.get('hpc')
         while serial == self._hpc_job_serial and not self._hpc_monitor_stop.is_set():
             observation = client.status(submission)
             for field in ("status", "conclusion"):
                 if field in observation:
                     submission[field] = observation[field]
+            self._bind_remote_stop('hpc', client, submission, context)
             self._ui_call(lambda current=observation: self._render_student_hpc_status(current)
                 if serial == self._hpc_job_serial else None)
             if observation.get('status') == 'completed':
@@ -5242,23 +5792,11 @@ class CoChemGUI(InputManagementMixin):
         self._hpc_refresh_worker.start()
 
     def _cancel_student_hpc(self, b: Any = None) -> None:
-        if self._hpc_client is None or self._hpc_submission is None:
-            return
-        self.btn_hpc_cancel.disabled = True
-        submission = dict(self._hpc_submission)
-        def cancel() -> None:
-            try:
-                self._hpc_client.cancel(submission)
-                self._ui_call(lambda: setattr(self.slurm_status_output, 'value', "<p role='status'>Scheduler cancellation requested. Refresh status to confirm the final queue outcome; partial diagnostics remain available.</p>"))
-                self._refresh_student_hpc()
-            except (ValueError, RuntimeError, OSError) as exc:
-                message = str(exc)
-                self._ui_call(lambda: setattr(self.slurm_status_output, 'value', f"<p role='alert'>HPC cancellation was not confirmed: {html.escape(message)}. Refresh status before taking another action.</p>"))
-                self._ui_call(lambda: setattr(self.btn_hpc_cancel, 'disabled', False))
-        self._hpc_cancel_worker = threading.Thread(target=cancel, daemon=True)
-        self._hpc_cancel_worker.start()
+        self._request_remote_stop('hpc')
 
     def _retrieve_student_hpc(self, b: Any = None) -> None:
+        if self._actions_state_operation is not None:
+            return
         if self._hpc_client is None or self._hpc_submission is None or self._hpc_retrieving:
             return
         self._hpc_retrieving = True
@@ -5308,30 +5846,71 @@ class CoChemGUI(InputManagementMixin):
         self._hpc_history_worker = threading.Thread(target=restore, daemon=True)
         self._hpc_history_worker.start()
 
+    def _hold_unknown_hpc_submission(self, client: Any, error: StudentHpcSubmissionUnknown,
+                                     context: dict[str, Any] | None = None) -> None:
+        if context is not None and self._remote_stops.get('hpc') is not context:
+            return
+        self._hpc_unknown_active = True
+        self._hpc_unknown_attempt = error.attempt
+        self._hpc_running = True
+        if self._hpc_submission is None:
+            self._hpc_client = client
+        self.btn_slurm_submit.disabled = True
+        self.btn_hpc_cancel.disabled = False
+        self.btn_cancel.disabled = False
+        self.btn_hpc_refresh.disabled = self._hpc_submission is None
+        self.slurm_status_output.value = (
+            '<p role="alert">We cannot confirm whether the calculation service accepted this request. '
+            'Do not submit it again. Contact the instructor or cluster support to confirm the job and recover its identity. '
+            'A stop request will wait for that confirmation; no job is reported as stopped.</p>'
+            '<details><summary>Request details for support</summary><p>'
+            + html.escape(str(error.locator)) + ': ' + html.escape(str(error)) + '</p></details>')
+        self._refresh_execution_gate()
+
     def _refresh_student_hpc_history(self) -> None:
         if self._hpc_client is None:
             return
+        client = self._hpc_client
+        serial = self._hpc_job_serial
+        context = self._remote_stops.get('hpc')
+        def current() -> bool:
+            return (self._hpc_client is client and self._hpc_job_serial == serial
+                    and self._remote_stops.get('hpc') is context)
         try:
-            items = self._hpc_client.history()
+            pending_attempts = client.pending_attempts()
+            if pending_attempts:
+                self._ui_call(lambda: self._hold_unknown_hpc_submission(client, StudentHpcSubmissionUnknown(
+                    'A saved scheduler request is still waiting for confirmation.', pending_attempts[0])) if current() else None)
+                return
+            items = client.history()
             history = {str(item['request_id']): item for item in items}
             pending = next((item for item in reversed(items) if item.get('status') != 'completed'), None)
-            if pending is not None and self._hpc_submission is None:
-                self._hpc_running = True
-                self._hpc_submission = dict(pending)
-                self._hpc_job_serial += 1
             def publish() -> None:
+                if not current() or self._hpc_unknown_active:
+                    return
                 self._hpc_history = history
                 self.hpc_history.options = [(f"{item.get('scheduler', 'HPC')} {item.get('job_id', 'pending')} ({item.get('status', 'unknown')})", key)
                     for key, item in history.items()] or [("No retained scheduler jobs", "")]
-                self.btn_hpc_open.disabled = not bool(history)
+                if pending is not None and self._hpc_submission is None:
+                    self._hpc_running = True
+                    self._hpc_submission = dict(pending)
+                    self._hpc_job_serial += 1
+                    self._new_remote_stop('hpc')
+                self.btn_hpc_open.disabled = not bool(history) or self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._pipeline_running or self._topos_running
                 if pending is not None and self._hpc_submission is not None:
                     self.hpc_history.value = str(self._hpc_submission['request_id'])
                     self._render_student_hpc_status(self._hpc_submission)
             self._ui_call(publish)
+        except StudentHpcSubmissionUnknown as exc:
+            error = exc
+            self._ui_call(lambda: self._hold_unknown_hpc_submission(client, error) if current() else None)
         except (ValueError, RuntimeError, OSError, KeyError) as exc:
             logger.warning('Retained HPC history was not loaded: %s', exc)
 
     def _open_student_hpc_history(self, b: Any = None) -> None:
+        if self._hpc_running or self._hpc_retrieving or self._actions_running or self._actions_state_operation is not None or self._pipeline_running or self._topos_running:
+            self.slurm_status_output.value = '<p role="status">Wait for or cancel the tracked calculation before opening another saved HPC job. Its owned request remains selected for cancellation.</p>'
+            return
         item = getattr(self, '_hpc_history', {}).get(self.hpc_history.value)
         if item is None:
             return
@@ -5381,7 +5960,7 @@ class CoChemGUI(InputManagementMixin):
             self.actions_job_download.value = (
                 "<p role='status'><b>Actions request validated.</b> No calculation has been submitted or run.</p>"
                 f"<p><a download='{filename}' href='data:application/json;base64,{encoded}'>Download {engine_name} request JSON</a></p>"
-                "<p>This copy is optional. Select <b>Run on GitHub Actions</b> to submit, monitor and retrieve your calculation directly in BASE.</p>"
+                "<p>This copy is optional. Before submitting, select <b>Check saved project request</b> and follow the instructions shown there.</p>"
                 f"<p>Input SHA-256: <code>{digest}</code>. Calculation timeout: {self.actions_timeout.value} seconds.</p>"
             )
             self.state.system_status = "Actions job prepared"
@@ -5391,16 +5970,260 @@ class CoChemGUI(InputManagementMixin):
             self.state.error_message = str(exc)
             self.actions_job_download.value = f"<p role='alert'>Actions job was not prepared: {html.escape(str(exc))}</p>"
 
+    def _actions_view_identity(self) -> tuple:
+        saved = self._actions_submission or {}
+        return (self._actions_client, saved.get('request_id'), saved.get('admission_generation'),
+            self._hpc_job_serial,
+            getattr(self, '_pipeline_cancellation', None), getattr(self, '_topos_cancellation', None),
+            getattr(self, '_local_view_generation', None))
+
+    def _begin_actions_state_operation(self):
+        if self._actions_state_operation is not None:
+            return None
+        operation = {'view': self._actions_view_identity(),
+                     'stop_context': self._remote_stops.get('actions'),
+                     'hpc_stop_context': self._remote_stops.get('hpc'),
+                     'target': (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or 'main')}
+        self._actions_state_operation = operation
+        self.btn_actions_open.disabled = True
+        self.btn_actions_recover.disabled = True
+        self.btn_actions_refresh.disabled = True
+        self.btn_actions_retrieve.disabled = True
+        self._refresh_execution_gate()
+        return operation
+
+    def _actions_operation_current(self, operation) -> bool:
+        return (self._actions_state_operation is operation
+            and operation['view'] == self._actions_view_identity()
+            and operation['stop_context'] is self._remote_stops.get('actions')
+            and operation['hpc_stop_context'] is self._remote_stops.get('hpc')
+            and operation['target'] == (self.gh_repo_input.value.strip(), self.gh_branch_input.value.strip() or 'main'))
+
+    def _publish_actions_operation(self, operation, publish) -> None:
+        def guarded() -> None:
+            with self._job_stop_lock:
+                if not self._actions_operation_current(operation):
+                    return
+                publish()
+                operation['view'] = self._actions_view_identity()
+                operation['stop_context'] = self._remote_stops.get('actions')
+                operation['hpc_stop_context'] = self._remote_stops.get('hpc')
+        self._ui_call(guarded)
+
+    def _refresh_actions_control_state(self) -> None:
+        """Recompute from the current view, never a stale callback's saved result."""
+        busy = (self._actions_state_operation is not None or self._pipeline_running
+                or self._hpc_running or self._hpc_retrieving or self._topos_running or self._actions_retrieving)
+        saved = self._actions_submission or {}
+        self.btn_actions_recover.disabled = bool(busy or self._actions_running)
+        self.btn_actions_open.disabled = bool(busy or self._actions_running or not self._actions_history_records)
+        self.btn_actions_refresh.disabled = bool(busy or self._actions_client is None or not saved)
+        if saved.get('admission_phase') == 'prepared':
+            try:
+                self._saved_actions_review(saved)
+            except (ValueError, RuntimeError, KeyError, TypeError):
+                self.btn_actions_refresh.disabled = True
+        final = saved.get('admission_terminal') is True if saved.get('admission_protocol') else saved.get('status') == 'completed'
+        self.btn_actions_retrieve.disabled = bool(busy or not final or saved.get('conclusion') is None)
+
+    def _finish_actions_state_operation(self, operation) -> None:
+        def finish() -> None:
+            with self._job_stop_lock:
+                if self._actions_state_operation is not operation:
+                    return  # Never release another operation's lease.
+                self._actions_state_operation = None
+                self._actions_admission_checking = False
+                # Even a superseded result releases its own short lease. Only
+                # current state determines controls; no captured observation is published.
+                self._refresh_actions_control_state()
+                self._refresh_execution_gate()
+        self._ui_call(finish)
+
+    def _saved_actions_review(self, saved: dict) -> str:
+        from cochem_base.interfaces.student_request import decode_request
+        request = decode_request(saved['request_base64'], saved['payload_sha256'])
+        for key in ('request_id', 'repository', 'source_sha', 'worker_source_sha'):
+            if request[key] != saved[key]:
+                raise ValueError('The saved calculation details do not match its original request')
+        rows = [('Saved at', request['submitted_at']), ('Request', request['request_id'])]
+        calculation, provider = request['calculation'], request['provider']
+        if calculation is not None:
+            from cochem_base.calc.calculation_service import CalculationMatrixConfig
+            validated = CalculationMatrixConfig.model_validate(calculation)
+            # Defaults are never substituted into the student's saved review.
+            if (not isinstance(calculation.get('method'), str) or not calculation['method'].strip()
+                    or type(calculation.get('charge')) is not int or type(calculation.get('multiplicity')) is not int
+                    or type(calculation.get('is_opt')) is not bool or type(calculation.get('is_freq')) is not bool):
+                raise ValueError('This saved calculation lacks explicit task, method or electronic-state details; ask the instructor to review it')
+            if calculation.get('is_vpt2', False) is not False:
+                raise ValueError('The saved VPT2 task needs its downstream scientific adapter; this hosted route cannot certify it')
+            task = ('Geometry optimization' if calculation['is_opt'] else 'Single point')
+            if calculation['is_freq']:
+                task = 'Geometry optimization and harmonic frequencies' if calculation['is_opt'] else 'Harmonic frequencies'
+            basis = calculation.get('basis_set')
+            if calculation['engine'] == 'xtb':
+                basis_review = 'Not applicable: the saved xTB method has no separate orbital basis choice'
+            elif calculation['method'].strip().lower() == 'r2scan-3c' and validated.basis_set in {None, 'built-in', 'default'}:
+                basis_review = 'Built into the explicitly saved r2SCAN-3c composite method'
+            elif not isinstance(basis, str) or not basis.strip() or basis.lower() in {'default', 'built-in'}:
+                raise ValueError('This saved method lacks its explicit applicable basis; no default basis will be substituted')
+            else:
+                basis_review = basis
+            rows += [('Saved task', task), ('Program', calculation['engine']), ('Method', calculation['method']),
+                     ('Basis', basis_review),
+                     ('Charge', calculation['charge']), ('Spin multiplicity', calculation['multiplicity'])]
+            geometry = calculation['geometry'].encode('utf-8')
+            rows += [('Supplied geometry', geometry.decode('utf-8').splitlines()[0] + ' atoms'),
+                     ('Geometry SHA-256', hashlib.sha256(geometry).hexdigest())]
+            if validated.engine == 'qe':
+                rows += [('Periodic settings', json.dumps(calculation['periodic'], sort_keys=True))]
+            for key in ('recipe', 'theory_tier', 'implicit_solvation', 'cbs_cardinal_pair', 'grid_stage',
+                        'frozen_monomer_indices', 'initial_hessian', 'r2_reference_manifest', 't9_fallback'):
+                if calculation.get(key) is not None:
+                    rows += [('Saved '+key.replace('_', ' '), json.dumps(calculation[key], sort_keys=True))]
+        elif provider is not None:
+            from cochem_base.interfaces.student_research import validate_provider_request, validate_provider_resources, required_provider_engines
+            validate_provider_request(provider, request['files'])
+            validate_provider_resources(provider, request['resources'])
+            rows += [('Saved task', provider['operation']), ('Provider', provider['module'])]
+            if provider['operation'] == 'geometry_analysis':
+                rows += [('Method and electronic state', 'Not applicable: this saved operation analyzes supplied geometry without an electronic-energy calculation')]
+            else:
+                options = provider['options']
+                science = options['topos_request'] if provider['module'] == 'topos' else options
+                state = science['molecule'] if provider['module'] == 'topos' else science
+                method = science.get('method')
+                if (type(state.get('charge')) is not int or type(state.get('multiplicity')) is not int
+                        or state['multiplicity'] < 1):
+                    raise ValueError('The saved provider operation lacks its explicit electronic charge and multiplicity')
+                if provider['module'] == 'torq':
+                    if (not isinstance(method, dict) or not isinstance(method.get('name'), str)
+                            or not method['name'].strip() or not isinstance(method.get('basis'), str)
+                            or not method['basis'].strip()):
+                        raise ValueError('The saved TORQ operation lacks its explicit method and applicable basis')
+                    method_review, basis_review = method['name'], method['basis']
+                else:
+                    if not isinstance(method, str) or not method.strip():
+                        raise ValueError('The saved TOPOS operation lacks its explicit method')
+                    method_review = method
+                    if science.get('engine') == 'xtb':
+                        basis_review = 'Not applicable to the saved xTB provider method'
+                    elif method.strip().lower() == 'r2scan-3c':
+                        basis_review = 'Built into the explicitly saved r2SCAN-3c composite method'
+                    elif not isinstance(science.get('basis'), str) or not science['basis'].strip():
+                        raise ValueError('This saved TOPOS method lacks a reviewable explicit basis; instructor review is needed')
+                    else:
+                        basis_review = science['basis']
+                rows += [('Program/profile', ', '.join(required_provider_engines(provider))), ('Method', method_review),
+                         ('Basis', basis_review), ('Charge', state['charge']), ('Spin multiplicity', state['multiplicity']),
+                         ('Saved provider settings', json.dumps(options, sort_keys=True))]
+            rows += [('Selected input', provider['artifact']), ('Input SHA-256', provider['artifact_sha256'])]
+        else:
+            raise ValueError('This saved request is not a research calculation')
+        rows.extend(('Input '+name, item['sha256']) for name,item in request['files'].items())
+        for key in ('scientific_inputs', 'data_inputs', 't9_request'):
+            if request[key] is not None:
+                rows += [('Saved '+key.replace('_', ' '), json.dumps(request[key], sort_keys=True))]
+        essentials, advanced = [], []
+        essential_labels = {'Saved at', 'Saved task', 'Program', 'Method', 'Basis', 'Charge',
+            'Spin multiplicity', 'Supplied geometry', 'Provider', 'Method and electronic state',
+            'Program/profile', 'Selected input'}
+        for label, value in rows:
+            if label.startswith('Input '):
+                essentials.append(('Input file', label[len('Input '):]))
+                advanced.append((label, value))
+            elif label in essential_labels:
+                essentials.append((label, value))
+            else:
+                advanced.append((label, value))
+        if calculation is not None and not request['files']:
+            essentials.append(('Input structure', 'Embedded geometry in the saved request'))
+        advanced.extend((label, saved[key]) for label,key in (
+            ('Project source SHA-1', 'source_sha'), ('Approved worker SHA-1', 'worker_source_sha'),
+            ('Request SHA-256', 'payload_sha256'), ('Generation', 'admission_generation'),
+            ('Dispatch anchor', 'admission_anchor')) if saved.get(key) is not None)
+        def render(values):
+            return '<dl>' + ''.join('<dt>'+html.escape(str(key))+'</dt><dd>'+html.escape(str(value))+'</dd>'
+                                    for key,value in values) + '</dl>'
+        extra = any(label.startswith('Saved ') and label not in {'Saved at', 'Saved task'}
+                    or label == 'Periodic settings' for label,value in advanced)
+        warning = ('<p>Additional solvent, constraint or other options are saved for this calculation. '
+            'Their applicability follows the selected operation. Review the advanced saved settings before submitting.</p>'
+            if extra else '')
+        return ("<section><h4>Review the saved calculation</h4><p><b>Submit saved calculation uses these saved structures and settings, not your current draft edits.</b></p>"
+            + render(essentials) + warning
+            + '<details><summary>Advanced saved settings and provenance</summary>'
+            + render(advanced) + '</details></section>')
+
+    def _recover_actions_admission(self, b: Any = None) -> None:
+        """Read current project state before enabling research; never auto-dispatch."""
+        if (self._actions_state_operation is not None or self._actions_running or self._actions_retrieving
+                or self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running
+                or self._local_file_operation is not None):
+            return
+        try:
+            repository = self._actions_repository()
+            branch = self.gh_branch_input.value.strip() or 'main'
+        except ValueError as error:
+            self.actions_status.value = "<p role='alert'>" + html.escape(str(error)) + '</p>'
+            return
+        operation = self._begin_actions_state_operation()
+        if operation is None:
+            return
+        self._actions_admission_checking = True
+        target = (repository, branch)
+        # Reuse an already authenticated matching project session, including its
+        # verified API origin; otherwise construct the normal GitHub client.
+        previous_client = self._actions_client
+        client = (previous_client if previous_client is not None
+            and previous_client.repository == repository and previous_client.branch == branch else None)
+        self.actions_status.value = "<p role='status'>Checking the saved request for this project…</p>"
+        def recover() -> None:
+            nonlocal client
+            try:
+                if client is None:
+                    from cochem_base.config_loader import get_artifact_dir
+                    from cochem_base.interfaces.student_actions import StudentActionsClient
+                    client = StudentActionsClient(repository, branch=branch,
+                        repository_root=Path(os.environ.get('COCHEM_ASSIGNMENT_ROOT', str(_REPO_ROOT))), artifact_dir=get_artifact_dir())
+                submission = client.recover_admission()
+                def publish() -> None:
+                    self._actions_admission_checked = target
+                    if submission is None or submission.get('admission_terminal') is True:
+                        self._actions_client = client
+                        self.actions_status.value = '<p>No active saved request was found. A new calculation will recheck project access and the approved workflow.</p>'
+                    else:
+                        self._new_remote_stop('actions')
+                        self._actions_client, self._actions_submission = client, dict(submission)
+                        self._actions_monitor_stop.clear()
+                        self._render_student_actions_status(submission)
+                    self._refresh_execution_gate()
+                self._publish_actions_operation(operation, publish)
+            except (ValueError, RuntimeError, OSError, ImportError) as error:
+                message = str(error)
+                def refuse() -> None:
+                    self._actions_admission_checked = None
+                    self.actions_status.value = ("<p role='alert'>This saved project request needs attention. Ask your instructor to review this saved request. Your structures and settings are kept. "
+                        "Do not submit this calculation again until it has been checked.</p>"
+                        "<details><summary>Technical details</summary><p>" + html.escape(message) + '</p></details>')
+                self._publish_actions_operation(operation, refuse)
+            finally:
+                self._finish_actions_state_operation(operation)
+        self._actions_recovery_worker = threading.Thread(target=recover, daemon=True)
+        self._actions_recovery_worker.start()
+
     def _submit_student_actions(self, b: Any = None, *, provider: dict[str, Any] | None = None,
                                calculation_override: dict[str, Any] | None = None,
                                periodic_inputs: dict[str, Any] | None = None) -> None:
         """Submit data, dispatch and correlate a hosted calculation through BASE."""
-        if self._actions_running or self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running:
+        if self._actions_state_operation is not None or self._actions_running or self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running:
             return
         try:
             geometry = calculation_override['geometry'] if calculation_override is not None else self._student_current_xyz()
             repository = self._actions_repository()
             branch = self.gh_branch_input.value.strip() or "main"
+            if self._actions_admission_checked != (repository, branch):
+                raise ValueError("Select Check saved project request before starting a calculation. Your structure and settings are kept.")
             if calculation_override is not None:
                 if provider is not None or periodic_inputs is None:
                     raise ValueError('A typed periodic calculation requires its bound uploaded inputs')
@@ -5454,9 +6277,13 @@ class CoChemGUI(InputManagementMixin):
                         self.state.error_message = "Preserved monomer input hash changed; research request was not submitted."
                         return
                     inputs[f"inputs/monomer-{item['id']}.xyz"] = raw
+        previous_client = self._actions_client
+        matching_client = (previous_client if previous_client is not None
+            and previous_client.repository == repository and previous_client.branch == branch else None)
         self._actions_submission = None
         self._actions_client = None
         self._actions_running = True
+        stop_context = self._new_remote_stop("actions")
         self._refresh_execution_gate()
         self._actions_monitor_stop.clear()
         self.btn_execute.disabled = True
@@ -5471,47 +6298,77 @@ class CoChemGUI(InputManagementMixin):
             try:
                 from cochem_base.config_loader import get_artifact_dir
                 from cochem_base.interfaces.student_actions import StudentActionsClient
-                client = StudentActionsClient(repository, branch=branch,
+                client = matching_client if matching_client is not None else StudentActionsClient(repository, branch=branch,
                     repository_root=Path(os.environ.get("COCHEM_ASSIGNMENT_ROOT", str(_REPO_ROOT))), artifact_dir=get_artifact_dir())
+                if stop_context["requested"]:
+                    raise RuntimeError("Calculation stopped before GitHub dispatch")
                 submission = client.submit(configuration, xyz_files=inputs, provider=provider,
                     scientific_inputs=scientific_input, t9_request=t9_request,
                     **({'periodic_inputs': periodic_inputs} if periodic_inputs is not None else {}),
                     **({'ingestion_inputs': ingestion_input} if ingestion_input is not None else {}),
                     cores=cores, maxcore_mb=maxcore_mb)
-                self._actions_client = client
-                self._actions_submission = submission
                 self._retain_student_actions_submission(submission)
                 def submitted() -> None:
+                    with self._job_stop_lock:
+                        if self._remote_stops.get('actions') is not stop_context:
+                            return
+                        self._actions_client, self._actions_submission = client, dict(submission)
+                        self._bind_remote_stop('actions', client, submission, stop_context)
                     self.btn_cancel.disabled = False
                     self.btn_actions_refresh.disabled = False
                     self.state.error_message = ""
                     self.actions_job_download.value = "<p>The calculation has been submitted through BASE. Configuration export is available separately for reproducibility.</p>"
                     self._render_student_actions_status(submission)
                 self._ui_call(submitted)
-                self._poll_student_actions()
+                self._poll_student_actions(client=client, submission=dict(submission), context=stop_context)
             except (ValueError, RuntimeError, OSError, ImportError) as exc:
                 message = str(exc)
                 setup_link = _setup_check_link(getattr(exc, 'setup_url', None))
                 rejected = getattr(exc, 'submission', None)
-                if isinstance(rejected, dict) and rejected.get('status') == 'rejected':
+                if isinstance(rejected, dict):
                     self._retain_student_actions_submission(rejected)
+
+                can_transfer_stop = getattr(exc, "can_transfer_stop", True)
                 def failure() -> None:
-                    dispatched = self._actions_submission is not None
-                    self._actions_running = dispatched
-                    self.btn_cancel.disabled = not dispatched
-                    self.state.error_message = message
-                    self.state.system_status = "Actions monitoring requires attention" if dispatched else "Actions submission failed"
-                    self.actions_status.value = (
-                        f"<p role='alert'>Calculation {'was submitted, but monitoring paused' if dispatched else 'was not submitted'}: "
-                        f"{html.escape(message)}. {'Use Refresh calculation status; do not create a duplicate request.' if dispatched else 'BASE has retained your original geometry.'}</p>"
-                        + setup_link
-                    )
-                    self._refresh_execution_gate()
+                    if self._remote_stops.get("actions") is not stop_context:
+                        return
+                    with self._job_stop_lock:
+                        if self._remote_stops.get('actions') is not stop_context:
+                            return
+                        if isinstance(rejected, dict) and rejected.get('admission_protocol'):
+                            owned_context = stop_context if can_transfer_stop else self._new_remote_stop('actions')
+                            self._actions_client, self._actions_submission = client, dict(rejected)
+                            self._bind_remote_stop('actions', client, rejected, owned_context)
+                        dispatched = self._actions_submission is not None
+                        self._actions_running = dispatched and not self._actions_submission.get('admission_terminal', False)
+                        self.btn_cancel.disabled = not self._actions_running
+                        self.state.error_message = message
+                        self.state.system_status = "Actions monitoring requires attention" if dispatched else "Actions submission failed"
+                        if dispatched and self._actions_submission.get('admission_protocol'):
+                            # Show the actual saved phase and its verified review before
+                            # enabling any action. A prepared winner must never retain
+                            # a Refresh label on a button that can submit saved data.
+                            self._render_student_actions_status(dict(self._actions_submission))
+                            self.actions_status.value += (
+                                "<p role='alert'>This saved project request needs attention: " + html.escape(message)
+                                + '. Use its available saved-calculation controls; do not create a duplicate request.</p>' + setup_link)
+                        else:
+                            self.actions_status.value = (
+                                f"<p role='alert'>Calculation {'request needs confirmation; monitoring paused' if dispatched else 'was not submitted'}: "
+                                f"{html.escape(message)}. {'Use Refresh calculation status; do not create a duplicate request.' if dispatched else 'BASE has retained your original geometry.'}</p>"
+                                + setup_link)
+                        self._refresh_actions_control_state()
+                        self._refresh_execution_gate()
                 self._ui_call(failure)
         self._actions_worker = threading.Thread(target=submit, daemon=True)
         self._actions_worker.start()
 
     def _render_student_actions_status(self, observation: dict[str, Any]) -> None:
+        if self._actions_submission is not None and observation.get('request_id') != self._actions_submission.get('request_id'):
+            return
+        previous = self._actions_submission or {}
+        if previous.get('admission_terminal') is True and observation.get('admission_terminal') is not True:
+            return
         if self._actions_submission is not None and observation.get("request_id") == self._actions_submission.get("request_id"):
             self._actions_submission = dict(observation)
             self._retain_student_actions_submission(observation)
@@ -5523,20 +6380,38 @@ class CoChemGUI(InputManagementMixin):
         if isinstance(url, str) and url.startswith("https://github.com/"):
             link = f" <a href='{html.escape(url, quote=True)}' target='_blank' rel='noopener'>Calculation run details</a>"
         self.actions_status.value = (
-            f"<p role='status' aria-live='polite'><b>Calculation: {html.escape(str(status))}</b>"
-            + (f"; result: {html.escape(str(conclusion))}" if conclusion else "")
-            + f".<br/>Request: <code>{html.escape(str(request))}</code>." + link + "</p>"
+            f"<p role='status' aria-live='polite'><b>Calculation: {html.escape(progress_label(status))}</b>"
+            + (f"; result: {html.escape(progress_label(conclusion))}" if conclusion else "")
+            + "." + link + "</p>"
+            + ("<details><summary>Calculation tracking details</summary><p>Request: "
+                + f"<code>{html.escape(str(request))}</code>. Recorded status: <code>{html.escape(str(status))}</code>"
+                + (f"; recorded result: <code>{html.escape(str(conclusion))}</code>" if conclusion else "")
+                + ".</p></details>" if observation.get('admission_phase') != 'prepared' else '')
         )
         if status == 'dispatch_unconfirmed':
             self.actions_status.value += "<p role='status'>GitHub acknowledgement is delayed. BASE is checking the original request; do not submit it again.</p>"
-        complete = status in {"completed", "rejected"}
+        complete = (observation.get("admission_terminal") is True if observation.get("admission_protocol")
+                    else status in {"completed", "rejected"})
+        self.btn_actions_refresh.description = ("Submit saved calculation" if observation.get("admission_phase") == "prepared"
+                                                else "Refresh calculation status")
+        if observation.get('admission_phase') == 'prepared':
+            try:
+                self.actions_status.value += self._saved_actions_review(observation)
+                self.btn_actions_refresh.disabled = self._actions_state_operation is not None
+            except (ValueError, RuntimeError, KeyError, TypeError) as error:
+                self.btn_actions_refresh.disabled = True
+                self.actions_status.value += "<p role='alert'>Saved calculation cannot be submitted: " + html.escape(str(error)) + '.</p>'
+        if observation.get("admission_protocol") and not complete:
+            self.actions_status.value += ("<p>" + ("Stop is recorded. " if observation.get("stop_requested") else "")
+                + "This project request remains active until its exact outcome is confirmed. Do not submit it again.</p>")
         self._actions_running = not complete
+        self._bind_remote_stop('actions', self._actions_client, observation)
         self.btn_cancel.disabled = complete
         self.btn_actions_retrieve.disabled = not (complete and conclusion is not None)
         self.btn_actions_retrieve.description = "Retrieve and inspect results" if conclusion == "success" else "Retrieve calculation diagnostics"
-        self.state.system_status = f"Actions {conclusion if complete and conclusion else status}"
+        self.state.system_status = f"Actions: {progress_label(conclusion if complete and conclusion else status)}"
         self._actions_last_status = observation
-        self.btn_actions_open.disabled = not bool(getattr(self, "_actions_history_records", {})) or self._actions_running
+        self.btn_actions_open.disabled = not bool(getattr(self, "_actions_history_records", {})) or self._actions_running or self._actions_state_operation is not None
         self._refresh_execution_gate()
 
     def _retain_student_actions_submission(self, submission: dict[str, Any]) -> None:
@@ -5577,20 +6452,23 @@ class CoChemGUI(InputManagementMixin):
                     continue
         self._actions_history_records = observed
         selected = self.actions_history.value
-        self.actions_history.options = [(f"{record['repository']} · {record.get('status', 'submitted')} · {key[:8]}", key)
+        self.actions_history.options = [(f"{record['repository']} · {progress_label(record.get('status', 'submitted'))} · {key[:8]}", key)
                                         for key, record in observed.items()] or [("No retained calculations", "")]
         if selected in observed:
             self.actions_history.value = selected
-        self.btn_actions_open.disabled = not bool(observed) or self._actions_running
+        self.btn_actions_open.disabled = not bool(observed) or self._actions_running or self._actions_state_operation is not None
 
     def _open_student_actions_history(self, b: Any = None) -> None:
-        if self._actions_running or self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running:
+        if self._actions_state_operation is not None or self._actions_running or self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running:
             self.actions_status.value = "<p role='alert'>Finish or cancel the current calculation before opening another.</p>"
             return
         record = self._actions_history_records.get(self.actions_history.value)
         if not record:
             return
-        self.btn_actions_open.disabled = True
+        record = dict(record)
+        operation = self._begin_actions_state_operation()
+        if operation is None:
+            return
         def reopen() -> None:
             try:
                 from cochem_base.config_loader import get_artifact_dir
@@ -5607,7 +6485,7 @@ class CoChemGUI(InputManagementMixin):
                         self._render_student_actions_status(record)
                         self.btn_actions_refresh.disabled = True
                         self.actions_status.value += '<p role="alert">GitHub rejected this original request before a calculation run was accepted. Correct assignment access, then submit a new request; this retained identity remains unchanged.</p>'
-                    self._ui_call(rejection)
+                    self._publish_actions_operation(operation, rejection)
                 elif retained.is_file():
                     if retained.is_symlink() or retained.stat().st_size > 128 * 1024:
                         raise ValueError('The retained result receipt is invalid')
@@ -5637,70 +6515,82 @@ class CoChemGUI(InputManagementMixin):
                         self.actions_results_download.value = download
                         self.btn_actions_refresh.disabled = True
                         self.btn_actions_retrieve.disabled = True
-                    self._ui_call(imported)
+                    self._publish_actions_operation(operation, imported)
                 else:
                     client = StudentActionsClient(record['repository'], branch=record['branch'],
                         repository_root=Path(os.environ.get('COCHEM_ASSIGNMENT_ROOT', str(_REPO_ROOT))), artifact_dir=artifacts)
-                    self._actions_client = client
-                    self._actions_submission = dict(record)
-                    self._ui_call(lambda: setattr(self.btn_actions_refresh, 'disabled', False))
-                    self._refresh_student_actions()
+                    observation = client.status(record)
+                    def opened() -> None:
+                        self._new_remote_stop('actions')
+                        self._actions_client, self._actions_submission = client, dict(observation)
+                        self._render_student_actions_status(observation)
+                    self._publish_actions_operation(operation, opened)
             except (ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
                 message = str(exc)
-                self._ui_call(lambda: setattr(self.actions_status, 'value', f'<p role="alert">Previous calculation could not be reopened: {html.escape(message)}. No unverified data was accepted.</p>'))
+                self._publish_actions_operation(operation, lambda: setattr(self.actions_status, 'value', f'<p role="alert">Previous calculation could not be reopened: {html.escape(message)}. No unverified data was accepted.</p>'))
             finally:
-                self._ui_call(lambda: setattr(self.btn_actions_open, 'disabled', False))
+                self._finish_actions_state_operation(operation)
         self._actions_reopen_worker = threading.Thread(target=reopen, daemon=True)
         self._actions_reopen_worker.start()
 
-    def _poll_student_actions(self) -> None:
+    def _poll_student_actions(self, *, client, submission, context) -> None:
         deadline = time.monotonic() + 90 * 60
-        while self._actions_submission is not None and not self._actions_monitor_stop.is_set():
-            observation = self._actions_client.status(self._actions_submission)
-            self._ui_call(lambda current=observation: self._render_student_actions_status(current))
+        while self._remote_stops.get('actions') is context and not self._actions_monitor_stop.is_set():
+            observation = client.status(submission)
+            submission = observation
+            self._bind_remote_stop('actions', client, observation, context)
+            self._ui_call(lambda current=observation: self._render_student_actions_status(current)
+                if self._remote_stops.get('actions') is context else None)
             if observation.get("status") == "completed":
                 return
             if time.monotonic() >= deadline:
-                self._actions_client.cancel(self._actions_submission)
+                client.cancel(submission)
                 self._ui_call(lambda: setattr(self.actions_status, "value",
-                    "<p role='alert'>The 90-minute monitoring limit was reached. BASE requested cancellation; refresh status to confirm the final workflow outcome.</p>"))
+                    "<p role='alert'>The 90-minute monitoring limit was reached. BASE requested cancellation; refresh status to confirm the final workflow outcome.</p>")
+                    if self._remote_stops.get('actions') is context else None)
                 return
             self._actions_monitor_stop.wait(5)
 
     def _refresh_student_actions(self, b: Any = None) -> None:
-        if self._actions_submission is None or self._actions_client is None:
+        if (self._actions_submission is None or self._actions_client is None
+                or self._actions_state_operation is not None or self._actions_retrieving
+                or self._hpc_running or self._hpc_retrieving or self._pipeline_running or self._topos_running):
             return
-        self.btn_actions_refresh.disabled = True
+        client, saved = self._actions_client, dict(self._actions_submission)
+        submit_saved = bool(b is self.btn_actions_refresh and saved.get('admission_phase') == 'prepared'
+                            and saved.get('admission_protocol'))
+        if submit_saved:
+            try:
+                self._saved_actions_review(saved)
+            except (ValueError, RuntimeError, KeyError, TypeError) as error:
+                self.actions_status.value = "<p role='alert'>The saved calculation needs instructor review: " + html.escape(str(error)) + '</p>'
+                self.btn_actions_refresh.disabled = True
+                return
+        operation = self._begin_actions_state_operation()
+        if operation is None:
+            return
         def refresh() -> None:
             try:
-                observation = self._actions_client.status(self._actions_submission)
-                self._ui_call(lambda: self._render_student_actions_status(observation))
-            except (ValueError, RuntimeError, OSError) as exc:
-                message = str(exc)
-                self._ui_call(lambda: setattr(self.actions_status, "value", f"<p role='alert'>Status could not be refreshed: {html.escape(message)}</p>"))
+                observation = client.resume_prepared_admission(saved) if submit_saved else client.status(saved)
+                self._publish_actions_operation(operation, lambda: self._render_student_actions_status(observation))
+            except (ValueError, RuntimeError, OSError) as error:
+                message = str(error)
+                def refuse() -> None:
+                    self.actions_status.value = ("<p role='alert'>This saved project request needs attention. Ask your instructor to review this saved request. Your structures and settings are kept. "
+                        "Do not submit this calculation again until it has been checked.</p>"
+                        "<details><summary>Technical details</summary><p>" + html.escape(message) + '</p></details>')
+                self._publish_actions_operation(operation, refuse)
             finally:
-                self._ui_call(lambda: setattr(self.btn_actions_refresh, "disabled", False))
+                self._finish_actions_state_operation(operation)
         self._actions_refresh_worker = threading.Thread(target=refresh, daemon=True)
         self._actions_refresh_worker.start()
 
     def _cancel_student_actions(self, b: Any = None) -> None:
-        if self._actions_submission is None or self._actions_client is None:
-            return
-        self.btn_cancel.disabled = True
-        self.state.system_status = "Requesting remote cancellation"
-        def cancel() -> None:
-            try:
-                self._actions_client.cancel(self._actions_submission)
-                self._ui_call(lambda: setattr(self.actions_status, "value",
-                    "<p role='status'>Cancellation requested. BASE continues monitoring until GitHub confirms the final outcome.</p>"))
-            except (ValueError, RuntimeError, OSError) as exc:
-                message = str(exc)
-                self._ui_call(lambda: setattr(self.actions_status, "value", f"<p role='alert'>Cancellation could not be confirmed: {html.escape(message)}. Refresh status.</p>"))
-                self._ui_call(lambda: setattr(self.btn_cancel, "disabled", False))
-        self._actions_cancel_worker = threading.Thread(target=cancel, daemon=True)
-        self._actions_cancel_worker.start()
+        self._request_remote_stop('actions')
 
     def _retrieve_student_actions(self, b: Any = None) -> None:
+        if self._actions_state_operation is not None:
+            return
         if self._actions_submission is None or self._actions_client is None:
             return
         self.btn_actions_retrieve.disabled = True
@@ -5763,6 +6653,7 @@ class CoChemGUI(InputManagementMixin):
                         self._remote_engine_availability[engine] = item
                 self._refresh_engine_choices()
                 self._refresh_research_engine_choices()
+                self._refresh_orbital_backend_choices()
 
     def _import_student_actions_results(self, receipt: dict[str, Any]) -> None:
         root = Path(receipt["path"]).resolve()
@@ -5881,19 +6772,331 @@ class CoChemGUI(InputManagementMixin):
             self.actions_status.value = f"<p role='alert'>Calculated structure was not loaded: {html.escape(str(exc))}</p>"
 
     def _cancel_pipeline(self, b: Any = None) -> None:
-        if self._hpc_running and self._hpc_submission is not None:
+        if self._hpc_running:
             self._cancel_student_hpc()
             return
         if self._actions_running and self._actions_submission is not None:
             self._cancel_student_actions()
             return
-        if self._pipeline_running:
-            self._pipeline_cancellation.set()
-            self.btn_cancel.disabled = True
-            self.btn_periodic_cancel.disabled = True
-            self.state.system_status = "Cancelling calculation..."
+        self._cancel_local_calculation()
 
-    def _pipeline_thread(self, config_path: Path) -> None:
+    def _build_local_calculation_controls(self) -> None:
+        self.btn_save_local_files = widgets.Button(description="Prepare calculation download", disabled=True)
+        self.local_files_download = widgets.HTML()
+        self.local_files_status = widgets.HTML()
+        self.viewed_local_calculation = widgets.HTML("<p>No registered local result is being viewed.</p>")
+        self.saved_local_calculation = widgets.Dropdown(options=[("Choose a saved calculation", None)], index=0,
+            description="Saved calculation:", style={"description_width": "initial"}, layout=widgets.Layout(width="100%"))
+        self.btn_reopen_saved_local = widgets.Button(description="Reopen saved calculation", disabled=True)
+        self.btn_refresh_saved_local = widgets.Button(description="Refresh saved calculations", disabled=True)
+        self.saved_local_status = widgets.HTML("<p role='status'>Reading registered local calculations…</p>")
+        self.calculation_result.observe(self._local_result_card_changed, names="value")
+        self.saved_local_calculation.observe(self._refresh_local_file_controls, names="value")
+        self.btn_save_local_files.on_click(self._save_retained_local_files)
+        self.btn_reopen_saved_local.on_click(self._reopen_saved_local_calculation)
+        self.btn_refresh_saved_local.on_click(self._refresh_saved_local_calculations)
+
+    def _local_result_card_changed(self, change: Any) -> None:
+        if self._expected_local_card_update == change["new"]:
+            self._expected_local_card_update = None
+            return
+        # Other native/remote/periodic writers cannot leave an old xTB archive
+        # attached to the newly displayed result. History itself is unchanged.
+        self._local_view_generation = object()
+        self._viewed_local_record_id = None
+        self.viewed_local_calculation.value = "<p>No registered local result is being viewed.</p>"
+        self.local_files_download.value = ""
+        self._refresh_local_file_controls()
+
+    def _local_file_work_active(self) -> bool:
+        with self._local_file_workers_lock:
+            self._local_file_workers = [worker for worker in self._local_file_workers
+                                        if worker.ident is None or worker.is_alive()]
+            return bool(self._local_file_workers)
+
+    def _start_local_file_worker(self, run: Any) -> None:
+        worker = threading.Thread(target=run, daemon=True)
+        with self._local_file_workers_lock:
+            self._local_file_workers.append(worker)
+            try:
+                worker.start()
+            except BaseException:
+                self._local_file_workers.remove(worker)
+                raise
+
+    def _local_store(self):
+        from cochem_base.config_loader import get_artifact_dir
+        from cochem_base.interfaces.local_calculations import LocalCalculationStore
+        return LocalCalculationStore(get_artifact_dir())
+
+    def _local_result_writer_active(self) -> bool:
+        return bool(self._pipeline_running or self._actions_running or self._actions_state_operation is not None or self._actions_retrieving
+                    or self._hpc_running or self._hpc_retrieving)
+
+    def _refresh_local_file_controls(self, change: Any = None) -> None:
+        if not hasattr(self, "btn_save_local_files"):
+            return
+        busy = self._local_file_operation is not None
+        selected = self._saved_local_summaries.get(self.saved_local_calculation.value)
+        self.btn_refresh_saved_local.disabled = busy
+        self.btn_reopen_saved_local.disabled = bool(busy or self._local_result_writer_active()
+            or not self._saved_local_catalog_available or selected is None or not selected.available)
+        self.btn_save_local_files.disabled = busy or self._viewed_local_record_id is None
+        running_notice = "<p role='status'>Finish or stop the current calculation before reopening an earlier result. Its saved files are kept.</p>"
+        if not busy and selected is not None and selected.available and self._local_result_writer_active():
+            self.saved_local_status.value = running_notice
+        elif self.saved_local_status.value == running_notice:
+            self.saved_local_status.value = "<p role='status'>Choose Reopen saved calculation to view the selected result.</p>"
+        if selected is not None and not selected.available:
+            self.saved_local_status.value = ("<p role='alert'>This saved calculation is unavailable.</p>"
+                "<details><summary>Saved-record details</summary>" + html.escape(selected.notice) + "</details>")
+
+    def _start_local_file_job(self, operation: str, work: Any, publish: Any, status: widgets.HTML) -> None:
+        if self._local_file_operation is not None:
+            return
+        context = object()
+        self._local_file_operation = context
+        status.value = "<p role='status'>" + html.escape(operation) + "…</p>"
+        self._refresh_local_file_controls()
+        def run() -> None:
+            try:
+                result = work()
+            except Exception as exc:
+                message = str(exc)
+                def finish_error() -> None:
+                    if self._local_file_operation is context:
+                        status.value = ("<p role='alert'>" + html.escape(operation) + " was unavailable. The current calculation and original files are unchanged.</p>"
+                            "<details><summary>File-operation details</summary>" + html.escape(message) + "</details>")
+                        self._local_file_operation = None
+                        self._refresh_local_file_controls()
+                self._ui_call(finish_error)
+            else:
+                def finish() -> None:
+                    if self._local_file_operation is context:
+                        try:
+                            publish(result)
+                        except Exception as exc:
+                            status.value = "<p role='alert'>File view was unavailable: " + html.escape(str(exc)) + "</p>"
+                        finally:
+                            self._local_file_operation = None
+                            self._refresh_local_file_controls()
+                self._ui_call(finish)
+        try:
+            self._start_local_file_worker(run)
+        except Exception as exc:
+            if self._local_file_operation is context:
+                self._local_file_operation = None
+                status.value = "<p role='alert'>File work could not start. Existing calculations are unchanged.</p><details><summary>File-operation details</summary>" + html.escape(str(exc)) + "</details>"
+                self._refresh_local_file_controls()
+
+    def _apply_saved_local_catalog(self, summaries: tuple, *, announce: bool = True) -> None:
+        previous = tuple(self._saved_local_summaries)
+        incoming = tuple(item.record_id for item in summaries)
+        if previous and incoming[:len(previous)] != previous:
+            # The managed index never evicts/reorders. A delayed or damaged
+            # catalog cannot erase a newer known record or pending choice.
+            self._saved_local_catalog_available = False
+            self.saved_local_status.value = "<p role='alert'>The saved list changed unexpectedly. Your current choices and files are kept; refresh the list before reopening.</p>"
+            return
+        self._saved_local_catalog_available = True
+        current = self.saved_local_calculation.value
+        self._saved_local_summaries = {item.record_id: item for item in summaries}
+        with self.saved_local_calculation.hold_sync():
+            self.saved_local_calculation.options = [("Choose a saved calculation", None)] + [(item.label, item.record_id) for item in summaries]
+            if current in self._saved_local_summaries:
+                self.saved_local_calculation.value = current
+            else:
+                # Ordinary catalog reconciliation selects only the visible
+                # None-valued placeholder, never a real saved calculation.
+                self.saved_local_calculation.index = 0
+        if announce:
+            self.saved_local_status.value = ("<p role='status'>Choose a saved calculation, then Reopen saved calculation. Highlighting a name does not change the viewed result.</p>"
+                if summaries else "<p role='status'>No local calculations are registered here yet. Existing files are not automatically scanned or imported.</p>")
+
+    def _refresh_saved_local_calculations(self, button: Any = None) -> None:
+        if self._local_file_operation is not None:
+            return
+        self._saved_local_catalog_available = False
+        self._start_local_file_job("Reading saved calculations", lambda: self._local_store().list_saved(),
+                                   self._apply_saved_local_catalog, self.saved_local_status)
+
+    def _saved_observation_identity(self, observation: dict) -> tuple:
+        return (json.dumps(observation["source"], sort_keys=True), observation["energy_kind"])
+
+    def _merge_saved_local_observation(self, verified: Any) -> None:
+        observation = verified.observation
+        key = self._saved_observation_identity(observation)
+        for existing in self._research_observations:
+            if self._saved_observation_identity(existing) == key:
+                existing.update(label=verified.label, saved_record_id=verified.record_id)
+                # Enriching an existing row must preserve an intentional empty
+                # selection just as precisely as a nonempty selection.
+                self._refresh_student_research_choices(select_all_if_empty=False)
+                return
+        number = 1 + max((item["local_calculation_number"] for item in self._research_observations
+                          if type(item.get("local_calculation_number")) is int), default=0)
+        self._append_student_research_records(verified.results_directory.parent, reports=[],
+            observations=[{**observation, "label": verified.label, "saved_record_id": verified.record_id,
+                           "local_calculation_number": number}])
+
+    def _register_saved_local_completion(self, receipt: dict, results_directory: Path, view_generation: object) -> None:
+        def run() -> None:
+            try:
+                store = self._local_store()
+                summary = store.register_completed(receipt, results_directory=results_directory)
+                verified = store.reopen_saved(summary.record_id)
+                summaries = store.list_saved()
+            except Exception as exc:
+                message = str(exc)
+                def unavailable() -> None:
+                    if self._local_view_generation is view_generation:
+                        self.local_files_status.value = ("<p role='alert'>Calculation completed; its saved-file record is unavailable. "
+                            "The calculation and current-session comparison remain available.</p><details><summary>File-record details</summary>"
+                            + html.escape(message) + "</details>")
+                self._ui_call(unavailable)
+            else:
+                def publish() -> None:
+                    self._merge_saved_local_observation(verified)
+                    self._apply_saved_local_catalog(summaries, announce=self._local_file_operation is None)
+                    if self._local_view_generation is view_generation:
+                        self._viewed_local_record_id = summary.record_id
+                        self.viewed_local_calculation.value = "<p><b>Viewing:</b> " + html.escape(summary.label) + "</p>"
+                        self.local_files_status.value = "<p role='status'>Retained calculation files are available for this saved result.</p>"
+                    self._refresh_local_file_controls()
+                self._ui_call(publish)
+        try:
+            self._start_local_file_worker(run)
+        except Exception as exc:
+            self.local_files_status.value = "<p role='alert'>Calculation completed; its file record could not be prepared.</p><details><summary>File-record details</summary>" + html.escape(str(exc)) + "</details>"
+
+    def _save_retained_local_files(self, button: Any = None) -> None:
+        identifier, generation = self._viewed_local_record_id, self._local_view_generation
+        if identifier is None:
+            return
+        def publish(archive: Any) -> None:
+            if self._viewed_local_record_id != identifier or self._local_view_generation is not generation:
+                return
+            encoded = base64.b64encode(archive.content).decode("ascii")
+            self.local_files_download.value = ("<a download='" + html.escape(archive.filename, quote=True)
+                + "' href='data:application/zip;base64," + encoded + "'>Download calculation files (.zip)</a>")
+            self.local_files_status.value = ("<p role='status'>Download is ready. Choose Download calculation files (.zip) to save it on your computer.</p>"
+                "<details><summary>File download details</summary>" + str(archive.member_count) + " members; SHA-256 "
+                + html.escape(archive.sha256) + "; exclusions: " + html.escape(", ".join(archive.exclusions)) + "</details>")
+        self._start_local_file_job("Preparing retained calculation files", lambda: self._local_store().retained_files_zip(identifier), publish, self.local_files_status)
+
+    def _reopen_saved_local_calculation(self, button: Any = None) -> None:
+        identifier = self.saved_local_calculation.value
+        summary = self._saved_local_summaries.get(identifier)
+        if summary is None or not summary.available or self._local_result_writer_active():
+            return
+        generation = self._local_view_generation
+        def publish(verified: Any) -> None:
+            if self._local_view_generation is not generation or self._local_result_writer_active():
+                self.saved_local_status.value = "<p role='status'>The current calculation view changed. Reopen the saved result again when it is idle.</p>"
+                return
+            self._publish_reopened_local_calculation(verified)
+        self._start_local_file_job("Reopening saved calculation", lambda: self._local_store().reopen_saved(identifier),
+                                   publish, self.saved_local_status)
+
+    def _publish_reopened_local_calculation(self, verified: Any) -> None:
+        # Render before changing the view or comparison. Every displayed value
+        # and the merged observation comes from this same validated snapshot.
+        card = reopened_xtb_result_html(verified)
+        self._merge_saved_local_observation(verified)
+        self._local_view_generation = object()
+        self._viewed_local_record_id = verified.record_id
+        self.viewed_local_calculation.value = "<p><b>Viewing:</b> " + html.escape(verified.label) + "</p>"
+        self._expected_local_card_update = card
+        self.calculation_result.value = card
+        self._expected_local_card_update = None
+        self.local_files_download.value = ""
+        self.local_files_status.value = "<p>Retained files are available for the saved result you are viewing.</p>"
+        self.saved_local_status.value = "<p role='status'>Viewing a saved calculation. Your current molecule and settings are unchanged.</p>"
+
+    def _capture_local_submission(self, config_path: Path) -> _LocalSubmission:
+        from cochem_base.config_loader import get_artifact_dir
+        raw = config_path.read_bytes()
+        identifier = self.student_geometry_choice.value or None
+        record = self._student_uploads.get(identifier) if identifier else None
+        kind = "editor_geometry" if identifier is None else "uploaded_record"
+        code, message, encoded = None, "", None
+        if identifier is not None:
+            try:
+                if record is None:
+                    raise ValueError("The selected input record is unavailable")
+                if "generation_provenance" in record:
+                    kind = "constructed_starting_geometry"
+                if record.get("origin") == "student_monomer_translation_seed":
+                    kind, code, message = "assembled_starting_geometry", "ASSEMBLED_SOURCE_CONTEXT_UNSUPPORTED", "Original records for assembled monomers are outside this file-export version"
+                elif record.get("origin") != "canonical_ingestion":
+                    code, message = "INPUT_SOURCE_UNVERIFIED", "This source is outside the supported InputLibrary original/frame contract"
+                encoded = json.dumps(record, sort_keys=True, allow_nan=False).encode()
+            except (ValueError, TypeError) as exc:
+                code = code or ("CONSTRUCTION_PROVENANCE_UNVERIFIED" if kind == "constructed_starting_geometry" else "INPUT_SOURCE_UNVERIFIED")
+                message = str(exc)
+        return _LocalSubmission(raw, get_artifact_dir(), identifier, encoded, kind, code, message)
+
+    def _build_local_input_snapshot(self, submission: _LocalSubmission):
+        from cochem_base.calc.local_publication import InputSnapshot, build_input_snapshot, digest, read_member
+        from cochem_base.interfaces.student_request import canonical_json, strict_json
+        code = submission.unavailable_code or "INPUT_SOURCE_UNVERIFIED"
+        try:
+            if submission.unavailable_code:
+                raise ValueError(submission.message)
+            if submission.source_kind == "editor_geometry":
+                return build_input_snapshot(submitted_config=submission.config_bytes, source_kind="editor_geometry")
+            record = strict_json(submission.record_bytes)
+            identifier, source_id = submission.selected_id, record.get("source_input_id")
+            if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier) or not isinstance(source_id, str) or not re.fullmatch(r"[a-f0-9]{32}", source_id):
+                raise ValueError("The selected source identifiers are invalid")
+            manifest = read_member(submission.artifact_root, f"StudentInputs/{identifier}/input-manifest.json", limit=2 * 1024 * 1024)
+            if canonical_json(strict_json(manifest)) != canonical_json(record):
+                raise ValueError("The selected input metadata changed after submission")
+            source = strict_json(read_member(submission.artifact_root, f"InputLibrary/{source_id}/receipt.json", limit=2 * 1024 * 1024))
+            original_path = Path(source["path"]).absolute().relative_to(submission.artifact_root)
+            if original_path.parent != Path("InputLibrary") / source_id or source.get("input_id") != source_id:
+                raise ValueError("The original path is outside its exact managed source")
+            original = read_member(submission.artifact_root, original_path.as_posix(), limit=8 * 1024 * 1024)
+            if digest(original) != source["sha256"] or source["sha256"] != record["source_sha256"]:
+                raise ValueError("The original source bytes changed")
+            code = "SELECTED_FRAME_UNVERIFIED"
+            frame_path = Path(record["path"]).absolute().relative_to(submission.artifact_root)
+            if frame_path.parent != Path("StudentInputs") / identifier or frame_path.name != "canonical-frame.xyz":
+                raise ValueError("The selected frame is outside its exact managed record")
+            frame = read_member(submission.artifact_root, frame_path.as_posix(), limit=2 * 1024 * 1024)
+            construction = None
+            if submission.source_kind == "constructed_starting_geometry":
+                code = "CONSTRUCTION_PROVENANCE_UNVERIFIED"
+                link = record["generation_provenance"]
+                path = Path(link["path"]).absolute().relative_to(submission.artifact_root)
+                if (len(path.parts) != 4 or path.parts[:2] != ("Input_Files", "Generated")
+                        or not re.fullmatch(r"[a-f0-9]{32}", path.parts[2]) or path.name != "starting-geometry.starting-geometry.json"):
+                    raise ValueError("The construction receipt is outside its managed producer")
+                raw = read_member(submission.artifact_root, path.as_posix(), limit=2 * 1024 * 1024)
+                document = strict_json(raw)
+                if digest(raw) != link["sha256"] or document.get("query") != link["query"] or document.get("resolution_source") != link["resolution_source"]:
+                    raise ValueError("The construction receipt changed")
+                construction = {"receipt": raw}
+            return build_input_snapshot(submitted_config=submission.config_bytes, source_kind=submission.source_kind,
+                source={"filename": source["filename"], "format": original_path.suffix.lower().lstrip("."), "content": original},
+                selected_frame={"record_index": record["source_frame"], "geometry": frame, "receipt": manifest}, construction=construction)
+        except Exception as exc:
+            return InputSnapshot.unavailable(submission.config_bytes, source_kind=submission.source_kind, code=code, message=str(exc))
+
+    def _publish_completed_xtb_result(self, execution_receipt: dict, results_directory: Path, view_generation: object = None) -> None:
+        """A display failure must not turn accepted native execution into failure."""
+        try:
+            card = completed_xtb_result_html(execution_receipt, results_directory)
+            if view_generation is not None and self._local_view_generation is view_generation:
+                self._expected_local_card_update = card
+            self.calculation_result.value = card
+            self._expected_local_card_update = None
+        except Exception as exc:
+            self.calculation_result.value = (
+                "<p role='status'>xTB execution completed. The saved result details are unavailable: "
+                + html.escape(str(exc)) + ". The native calculation files remain retained.</p>")
+
+    def _pipeline_thread(self, config_path: Path, submission: _LocalSubmission | None = None, view_generation: object = None) -> None:
         from cochem_base.calc.calculation_service import run_calculation
         from cochem_base.core_engine.cochem_core_subprocess_broker import (
             SubprocessCancelledError,
@@ -5905,6 +7108,9 @@ class CoChemGUI(InputManagementMixin):
             elif event.get("status") == "RUNNING":
                 self.state.system_status = "Running Pipeline..."
 
+        completed_local = None
+        if view_generation is None:
+            view_generation = self._local_view_generation
         try:
             work_dir = config_path.parent
             configuration = json.loads(config_path.read_text(encoding="utf-8"))
@@ -5920,8 +7126,9 @@ class CoChemGUI(InputManagementMixin):
                          else "harmonic frequencies" if configuration['is_freq']
                          else "optimization" if configuration['is_opt'] else "single point")
             self.telemetry_output.append_stdout(f"Running the saved {engine} {operation} configuration.\nFull logs and results: {work_dir}\n")
+            input_snapshot = self._build_local_input_snapshot(submission) if submission is not None and engine == "XTB" else None
             result = run_calculation(
-                config_path, scratch=work_dir / "Scratch", output=work_dir / "Results", device="cpu",
+                config_path, input_snapshot=input_snapshot, scratch=work_dir / "Scratch", output=work_dir / "Results", device="cpu",
                 on_event=on_event,
                 cancellation_event=self._pipeline_cancellation,
             )
@@ -5941,14 +7148,17 @@ class CoChemGUI(InputManagementMixin):
             self.telemetry_output.append_stdout(f"\n{engine} execution and scientific output checks passed. Results: {work_dir / 'Results'}\n")
             hessians = self._prepare_calculation_hessians(work_dir / "Results")
             self._ui_call(lambda: self._publish_calculation_hessians(hessians))
-            if engine in {"XTB", "PYSCF"}:
+            if engine == "XTB":
+                receipt, directory = dict(result), work_dir / "Results"
+                self._ui_call(lambda: self._publish_completed_xtb_result(receipt, directory, view_generation))
+            elif engine == "PYSCF":
                 result_path = work_dir / "Results" / "result.json"
                 payload = json.loads(result_path.read_text(encoding="utf-8"))
                 self.calculation_result.value = (
-                    f"<b>{'xTB screening result' if engine == 'XTB' else 'PySCF RHF single-point result'}</b> (no product accuracy certification)<br/>"
+                    "<b>PySCF RHF single-point result</b> (no product accuracy certification)<br/>"
                     f"Method: {html.escape(payload['method'])}<br/>"
                     f"Energy: {float(payload['energy_hartree']):.12f} Hartree<br/>"
-                    + (f"Optimization converged: {payload['optimization_converged'] is True}<br/>" if engine == "XTB" else f"SCF converged: {payload['scf_converged'] is True}<br/>Nuclear gradient: recorded in the result artifact.<br/>")
+                    + f"SCF converged: {payload['scf_converged'] is True}<br/>Nuclear gradient: recorded in the result artifact.<br/>"
                     +
                     f"Artifact: <code>{html.escape(str(result_path))}</code>"
                 )
@@ -5975,6 +7185,8 @@ class CoChemGUI(InputManagementMixin):
                 )
             else:
                 self.calculation_result.value = f"<b>ORCA {html.escape(operation)} accepted.</b> Results: <code>{html.escape(str(work_dir / 'Results'))}</code>"
+            if engine == "XTB":
+                completed_local = (dict(result), work_dir / "Results")
         except SubprocessCancelledError:
             self.state.system_status = "Calculation Cancelled"
             self.state.error_message = ""
@@ -5992,6 +7204,17 @@ class CoChemGUI(InputManagementMixin):
             self.btn_periodic_run.disabled = False
             self._check_dispersion_gate()
             self._refresh_topos_capabilities()
+            self._refresh_running_jobs()
+            self._ui_call(self._refresh_local_file_controls)
+        if completed_local is not None:
+            receipt, root = completed_local
+            try:
+                self._ui_call(lambda: self._register_completed_local_calculation(receipt, root))
+                self._ui_call(lambda: self._register_saved_local_completion(receipt, root, view_generation))
+            except Exception as exc:
+                self.telemetry_output.append_stdout(
+                    "Calculation completed; comparison registration was unavailable: " + str(exc) + "\n"
+                )
 
     def display(self) -> widgets.VBox:
         self.app.add_class("cochem-mainlayout")
@@ -6002,5 +7225,10 @@ class CoChemGUI(InputManagementMixin):
 
 def create_gui() -> widgets.VBox:
     """Entry point to instantiate and display the GUI."""
-    gui = CoChemGUI()
+    from ui.voila_layout.initial_widget_state import UnsupportedWidgetRuntime
+    try:
+        gui = CoChemGUI()
+    except UnsupportedWidgetRuntime as exc:
+        return widgets.VBox([widgets.HTML("<p role='alert'>Interface setup requires attention: "
+            + html.escape(str(exc)) + "</p>")])
     return gui.display()

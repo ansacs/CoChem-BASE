@@ -9,8 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from html import escape
+import re
+import unicodedata
+from collections.abc import Iterable
 
 import ipywidgets as widgets
+
+from .help_content import CONTROL_HELP, HELP_CONTENT
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ _HELP = {
         (
             "Codespaces is the computer that opens this interface in your browser or VS Code. GitHub Actions runs a calculation on a separate computer and returns its results. An engine available in one place is not necessarily available in the other.",
             "Choose GitHub Actions for the course's remote calculation route. Local uses the computer running BASE, which may itself be a Codespace rather than your laptop. HPC uses an institution's configured computing cluster, where jobs can wait in a queue before running.",
+            "A GPU can accelerate some calculations when the engine supports it. Google Colab is an optional remote GPU provider. Student Colab submission is currently unavailable while its connection is verified; use the prepared route in your assignment. Your instructor handles provider credentials. A GPU does not by itself improve the scientific method.",
             "ORCA and CFOUR are optional, strongly recommended engines. Check their availability in the selected calculation environment. A successful access check confirms access; only a completed calculation establishes that a particular method ran successfully.",
         ),
     ),
@@ -161,6 +167,43 @@ _HELP = {
 HELP_TOPICS = tuple(_HELP)
 
 
+_PROGRESS_LABELS = {
+    "prepared": "request prepared; submission not yet confirmed",
+    "submitted": "submission recorded",
+    "awaiting_workflow": "waiting for GitHub to start the job",
+    "dispatch_unconfirmed": "waiting for GitHub to confirm submission",
+    "dispatching": "request received; waiting for the run to appear",
+    "queued": "queued; waiting to run",
+    "requested": "requested",
+    "waiting": "waiting",
+    "pending": "pending",
+    "in_progress": "running",
+    "completed": "completed",
+    "rejected": "not accepted by GitHub",
+    "success": "successful",
+    "failure": "failed",
+    "neutral": "finished without a success or failure result",
+    "cancelled": "cancelled",
+    "cancellation_requested": "cancellation requested; waiting for GitHub",
+    "skipped": "not run",
+    "timed_out": "stopped at the time limit",
+    "action_required": "needs your attention on GitHub",
+    "stale": "no longer current",
+    "startup_failure": "the calculation computer could not start the job",
+    "updates_available": "compatible updates are available",
+    "current": "no compatible update is available",
+    "applied": "update installed",
+    "rolled_back": "previous version restored",
+    "restart_requested": "interface restart requested",
+    "complete": "complete",
+}
+
+
+def progress_label(code: str) -> str:
+    """Explain an observed protocol state without inferring success or changing it."""
+    return _PROGRESS_LABELS.get(str(code), "status not recognized; check details")
+
+
 def hint_html(topic: str) -> str:
     """Return the essential instruction as visible, escaped text."""
     return f'<p class="cochem-hint">{escape(_HELP[topic].hint)}</p>'
@@ -260,3 +303,307 @@ def build_glossary() -> widgets.VBox:
     panel = widgets.VBox([heading, search, results], layout=widgets.Layout(width="100%"))
     panel.add_class("cochem-glossary")
     return panel
+
+
+MAX_HELP_QUERY = 240
+MAX_HELP_RESULTS = 12
+_SEARCH_STOP_WORDS = frozenset(
+    "a an and are as at be can could did do does for from has have how i if in is it "
+    "me my of on or should that the their them there these they this to use using "
+    "was we were what when where which why will with would you your".split()
+)
+_SEARCH_WORDS = {
+    "chiralty": "chirality", "chiral": "chirality", "conformers": "conformer",
+    "isomers": "isomer", "enantiomers": "enantiomer", "resonance": "resonance",
+    "frequencies": "frequency", "vibrations": "vibration", "spectra": "spectrum",
+    "optimisation": "optimization", "optimise": "optimization",
+    "optimize": "optimization", "optimizing": "optimization",
+    "electrons": "electron", "orbitals": "orbital", "atoms": "atom",
+    "molecules": "molecule", "results": "result", "calculations": "calculation",
+    "files": "file", "charges": "charge", "isotopes": "isotope",
+}
+_SUGGESTED_TOPICS = (
+    "first_calculation", "isomers", "chirality", "spectroscopy", "charge_spin", "read_results",
+)
+
+
+@dataclass(frozen=True)
+class HelpTopic:
+    """An authored explanation, never a generated answer about a calculation."""
+
+    id: str
+    title: str
+    aliases: tuple[str, ...]
+    what: str
+    why: str
+    when: str
+    where: str
+    how: tuple[str, ...]
+    limitations: tuple[str, ...]
+    controls: tuple[str, ...]
+
+
+def _text_parts(value: str | Iterable[str]) -> tuple[str, ...]:
+    return (value,) if isinstance(value, str) else tuple(value)
+
+
+def _help_topics() -> tuple[HelpTopic, ...]:
+    # The content module contains plain local text only; no provider discovery,
+    # credential lookup or scientific state is consulted while reading help.
+    return tuple(
+        HelpTopic(
+            id=topic_id, title=record["title"], aliases=_text_parts(record["aliases"]),
+            what=record["what"], why=record["why"], when=record["when"],
+            where=record["where"], how=_text_parts(record["how"]),
+            limitations=_text_parts(record["limitations"]),
+            controls=_text_parts(record["controls"]),
+        )
+        for topic_id, record in HELP_CONTENT.items()
+    )
+
+
+def _normalized(text: str) -> str:
+    # Possessives should not turn every "molecule's" into a match for the
+    # stereochemical label S in a student's R/S question.
+    text = re.sub(r"['’]s\b", "", text.casefold())
+    decomposed = unicodedata.normalize("NFKD", text)
+    return " ".join(re.findall(r"[^\W_]+", "".join(
+        char for char in decomposed if not unicodedata.combining(char)
+    )))
+
+
+def _tokens(text: str) -> frozenset[str]:
+    return frozenset(
+        _SEARCH_WORDS.get(word, word)
+        for word in _normalized(text).split() if word not in _SEARCH_STOP_WORDS
+    )
+
+
+def _control_entries(topic_id: str) -> tuple[tuple[str, dict], ...]:
+    return tuple((control, metadata) for control, metadata in CONTROL_HELP.items()
+                 if metadata["topic"] == topic_id)
+
+
+def _topic_score(topic: HelpTopic, query: str, words: frozenset[str]) -> float:
+    title = _normalized(topic.title)
+    controls = _control_entries(topic.id)
+    labels = tuple(metadata["label"] for _, metadata in controls if metadata.get("label"))
+    aliases = tuple(_normalized(alias) for alias in (*topic.aliases, *labels))
+    title_words = _tokens(topic.title)
+    alias_words = _tokens(" ".join((*topic.aliases, *labels)))
+    introduction = _tokens(topic.what)
+    body = _tokens(" ".join((topic.why, topic.when, topic.where, *topic.how, *topic.limitations)))
+    control_words = _tokens(" ".join(
+        text for _, metadata in controls for text in (metadata["hint"], metadata["location"])
+    ))
+    # As-you-type prefixes apply to deliberate topic/control names and aliases.
+    # Incidental body text still requires a complete word.
+    title_matches = frozenset(word for word in words if word in title_words or (
+        len(word) >= 2 and any(token.startswith(word) for token in title_words)))
+    alias_matches = frozenset(word for word in words if word in alias_words or (
+        len(word) >= 2 and any(token.startswith(word) for token in alias_words)))
+    matched = title_matches | alias_matches | (words & (introduction | body | control_words))
+    if not matched:
+        return 0
+    # Weight deliberate names/aliases above incidental words in long answers.
+    # Coverage keeps an answer matching a whole question above a partial match.
+    score = (12 * len(title_matches) + 9 * len(alias_matches)
+             + 6 * len(words & control_words) + 4 * len(words & introduction) + len(words & body))
+    score *= len(matched) / len(words)
+    if query == title or query in aliases:
+        score += 100
+    elif len(query) > 2 and (query in title or any(query in alias for alias in aliases)):
+        score += 35
+    return score
+
+
+def search_topics(query: str, limit: int = 6) -> tuple[HelpTopic, ...]:
+    """Rank bounded, local explanations for words or ordinary-language questions.
+
+    Matching is deterministic lexical lookup with authored aliases, including
+    common spelling variants. It does not interpret uploaded files or ask an AI.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_HELP_RESULTS:
+        raise ValueError(f"Help result limit must be an integer from 1 to {MAX_HELP_RESULTS}.")
+    query = str(query)[:MAX_HELP_QUERY].strip()
+    topics = _help_topics()
+    if not query:
+        by_id = {topic.id: topic for topic in topics}
+        return tuple(by_id[topic_id] for topic_id in _SUGGESTED_TOPICS if topic_id in by_id)[:limit]
+    words = _tokens(query)
+    if not words:
+        return ()
+    normalized = _normalized(query)
+    ranked = [(topic, _topic_score(topic, normalized, words)) for topic in topics]
+    ranked.sort(key=lambda match: (-match[1], match[0].title.casefold(), match[0].id))
+    return tuple(topic for topic, score in ranked if score > 0)[:limit]
+
+
+def coverage_index(control_ids: Iterable[str] | None = None) -> dict:
+    """Report authored control coverage; never imply every GUI item is covered.
+
+    Supply an actual control inventory to obtain its unmapped identifiers. An
+    omitted inventory means coverage of other controls has not been assessed.
+    """
+    control_topics: dict[str, list[str]] = {}
+    topics = _help_topics()
+    for topic in topics:
+        for control in topic.controls:
+            control_topics.setdefault(control, []).append(topic.id)
+    for control, metadata in CONTROL_HELP.items():
+        topic_id = metadata["topic"]
+        if topic_id not in HELP_CONTENT:
+            raise ValueError(f"Help inventory references unknown topic: {topic_id}")
+        if topic_id not in control_topics.setdefault(control, []):
+            control_topics[control].append(topic_id)
+    return {
+        "topic_ids": tuple(topic.id for topic in topics),
+        "control_topics": {control: tuple(ids) for control, ids in control_topics.items()},
+        "control_metadata": {control: dict(metadata) for control, metadata in CONTROL_HELP.items()},
+        "unmapped_controls": tuple(sorted(set(control_ids or ()) - set(control_topics))),
+        "inventory_supplied": control_ids is not None,
+        "scope": "Authored help for the listed controls only. Other controls require an inventory review.",
+    }
+
+
+def _paragraphs(texts: Iterable[str]) -> str:
+    return "".join(f"<p>{escape(text)}</p>" for text in texts)
+
+
+def _control_help_html(topic_id: str) -> str:
+    entries = _control_entries(topic_id)
+    if not entries:
+        return ""
+    items = []
+    for control, metadata in entries:
+        label = metadata.get("label", "")
+        title = '<strong>' + escape(label) + '.</strong> ' if label else ""
+        advanced = " Advanced setting." if metadata.get("advanced") else ""
+        items.append(
+            '<li data-help-control="' + escape(control) + '"><p>' + title
+            + escape(metadata["hint"]) + '</p><p>Where: ' + escape(metadata["location"])
+            + escape(advanced) + '</p></li>'
+        )
+    return (
+        '<details class="cochem-help-controls"><summary>Help for individual controls</summary>'
+        '<p>These item instructions share the explanation and scientific limits above.</p><ul>'
+        + "".join(items) + '</ul></details>'
+    )
+
+
+def topic_html(topic: HelpTopic | str, *, opened: bool = False) -> str:
+    """Render escaped teaching text; advanced explanation starts collapsed."""
+    if isinstance(topic, str):
+        matches = {item.id: item for item in _help_topics()}
+        topic = matches[topic]
+    steps = "".join(f"<li>{escape(step)}</li>" for step in topic.how)
+    return (
+        '<details class="cochem-help-topic" data-help-topic="' + escape(topic.id) + '"'
+        + (" open" if opened else "")
+        + '><summary>' + escape(topic.title) + '</summary>'
+        + '<p><strong>What it means.</strong> ' + escape(topic.what) + '</p>'
+        + '<details class="cochem-help-depth"><summary>'
+        + 'Teach me more: why, when, where and how</summary>'
+        + '<p><strong>Why it matters.</strong> ' + escape(topic.why) + '</p>'
+        + '<p><strong>When to use it.</strong> ' + escape(topic.when) + '</p>'
+        + '<p><strong>Where to find it.</strong> ' + escape(topic.where) + '</p>'
+        + '<p><strong>How to proceed</strong></p><ol>' + steps + '</ol>'
+        + '<p><strong>Scientific limits</strong></p>' + _paragraphs(topic.limitations)
+        + '</details>' + _control_help_html(topic.id) + '</details>'
+    )
+
+
+def build_topic_answer(topic_id: str) -> widgets.HTML:
+    """Build an inline contextual answer from the same authored search content."""
+    answer = widgets.HTML(topic_html(topic_id, opened=True))
+    answer.add_class("cochem-context-answer")
+    return answer
+
+
+class LearningHelp:
+    """Independent widget controller with no calculation or account bindings."""
+
+    _READY = 'Offline help — no sign-in or calculation engine needed.'
+
+    def __init__(self) -> None:
+        self.search = widgets.Text(
+            description="Help search:", placeholder="Try chirality, charge, or a question",
+            continuous_update=True, style={"description_width": "initial"},
+            layout=widgets.Layout(flex="1 1 18rem", width="auto", min_width="0"),
+        )
+        self.clear = widgets.Button(
+            description="Clear help", tooltip="Clear the help question and close its explanations",
+            layout=widgets.Layout(width="auto"),
+        )
+        self.status = widgets.HTML()
+        self._result_html = widgets.HTML()
+        self.results = widgets.VBox(layout=widgets.Layout(width="100%"))
+        self.results.add_class("cochem-help-results")
+        toolbar = widgets.Box(
+            [self.search, self.clear],
+            layout=widgets.Layout(display="flex", flex_flow="row wrap", width="100%"),
+        )
+        toolbar.add_class("cochem-help-search")
+        self.widget = widgets.VBox(
+            [toolbar, self.status, self.results], layout=widgets.Layout(width="100%"),
+        )
+        self.widget.add_class("cochem-learning-help")
+        self.search.observe(self._search_changed, names="value")
+        self.clear.on_click(self._clear_clicked)
+        self._set_status(self._READY)
+
+    def _set_status(self, message: str) -> None:
+        self.status.value = '<p role="status" aria-live="polite">' + escape(message) + '</p>'
+
+    def _replace_results(self, topics: Iterable[HelpTopic], *, opened: bool = False) -> None:
+        # Keep one output model while typing instead of allocating fresh widget,
+        # layout and style models for every result on every keystroke.
+        self._result_html.value = "".join(topic_html(topic, opened=opened) for topic in topics)
+        self.results.children = (self._result_html,) if self._result_html.value else ()
+
+    def _search_changed(self, change: dict) -> None:
+        query = change["new"][:MAX_HELP_QUERY].strip()
+        if not query:
+            self._replace_results(())
+            self._set_status(self._READY)
+            return
+        topics = search_topics(query)
+        self._replace_results(topics)
+        if not topics:
+            self._set_status(
+                f'No help topics match “{query}”. Try a shorter chemistry word, such as '
+                'chirality, charge, frequency or energy. Clear help to start again.'
+            )
+            return
+        count = len(topics)
+        self._set_status(
+            f'{count} topic{"s" if count != 1 else ""} shown for “{query}”. '
+            'Select a title to read it. At most 6 topics are shown; add a word to narrow the search.'
+        )
+
+    def _clear_clicked(self, _button: widgets.Button) -> None:
+        self.search.value = ""
+        # Setting an already-empty Text does not notify observers. Close a
+        # contextual answer too, even when its search field was already empty.
+        self._replace_results(())
+        self._set_status(self._READY)
+        self.search.focus()
+
+    def open_topic(self, topic_id: str) -> bool:
+        """Show one contextual answer; an unknown ID receives an explicit status."""
+        topic = next((item for item in _help_topics() if item.id == topic_id), None)
+        self.search.value = ""
+        if topic is None:
+            self._replace_results(())
+            self._set_status(f'Help topic “{str(topic_id)[:MAX_HELP_QUERY]}” is not available. Try Help search.')
+            self.search.focus()
+            return False
+        self._replace_results((topic,), opened=True)
+        self._set_status(f'Contextual help: {topic.title}. Open “Teach me more” for the next steps and limitations.')
+        self.search.focus()
+        return True
+
+
+def build_learning_help() -> LearningHelp:
+    """Create compact, persistent help available before account or engine setup."""
+    return LearningHelp()

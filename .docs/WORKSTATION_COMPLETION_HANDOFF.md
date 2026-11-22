@@ -4,6 +4,58 @@ Prepared 2026-10-09. This is the working brief for the agent running on the
 instructor's local workstation. **Complete the implementation and genuine
 acceptance below; this document does not declare the unfinished work complete.**
 
+**Replacement agents: start with the [current takeover brief](AGENT_TAKEOVER.md).**
+It updates deployment access and evidence locations while retaining the full
+implementation backlog below. The agent performs tests and troubleshooting;
+the instructor is needed only for account-only approvals or unavailable settings.
+
+## 2026-10-18 recovery and module ownership update
+
+Start with the [recovery/validation record](GUI_Recovery_2026-10-18.md) and
+[module ownership audit](Module_Ownership_Audit_2026-10-18.md). The GUI corrections
+and public-source access fix are separate from the unresolved scientific-module
+ownership migration. BASE downloads canonical pinned TOPOS/TORQ providers, but
+also distributes overlapping namespaces and owns some TORQ scan/bond-analysis
+implementation. Follow the concrete canonical-module handoff before changing
+pins or deleting active code; keep every BASE SRS ingestion/conformer duty and
+scientific assertion.
+
+Use the [updated student pilot](Student_Deployment_Pilot.md) for a private
+independent project, initial GUI enrollment, App provisioning and a new Codespace
+with the resulting project permissions. Public forks, instructor API access and
+Classroom50 roster enrollment do not establish the selected student route.
+
+Run complete source-bound profiles with installed site packages enabled:
+`-B -I`, without `-S`. The process-admission guard needs installed `psutil`.
+The standard-library-only source audit can use `-S`. Preserve the original
+refused/failed results when correcting an invocation or implementation.
+
+For the **recovered cloud workspace only**, source its existing runtime
+activation and these tested discovery supplements before the complete profile:
+
+```bash
+. /workspace/cochem-runtime/student-srs-3ce9206-activate.sh
+. /workspace/cochem-runtime/crest-recovery-activate.sh
+. /workspace/cochem-runtime/recovery-mace-2026-10-18/activate-test-silo.sh
+```
+
+The supplements locate already audited programs; they do not install programs
+or change scientific settings. On another machine, verify the actual runtime
+locations and set `COCHEM_TEST_MACE_SILO` and
+`COCHEM_TEST_STOCK_CREST_EXECUTABLE` accordingly, with the genuine CREST
+executable on `PATH`. Do not copy these instance-specific paths or replace a
+missing installation with a test skip. The focused recovery receipts are linked
+from the recovery report above.
+
+The corrected frozen revision `31ed7a79dbf2fafa412db33877c228e7a67569cb`
+completed the local profile with **3,192 passes and six reviewed external
+deferrals**, with no unexpected skips, source changes, import-origin failures
+or remaining owned processes. The later `cfdd806` GUI presentation changes
+have separate focused and rendered-browser evidence; do not relabel the full
+profile as having run on that later revision. Refer to the recovery report for
+terminal hosted results and exact producer revisions. The real student pilot
+and canonical-module migration remain open.
+
 ## 2026-10-13 interface and access update
 
 Start the next review with the [plain-language quick guide](GET_STARTED.md).
@@ -220,7 +272,7 @@ Use the step-by-step [App guide](Personal_Project_App_Deployment.md). Register
 the instructor App and configure a private organization controller with Issues
 enabled, student-team Read access and instructor-only administration. Install the
 App on the organization and only the consenting student's selected private
-project. Use the documented Contents read, Secrets/Variables/Codespaces secrets
+project. Use the documented Contents read and write, Secrets/Variables/Codespaces secrets
 write and organization Members read permissions. Keep the signing PEM private
 and controller-only; read-only source/engine readers stay in private settings.
 Check the controller's Actions policy/billing and its approved exact worker SHA.
@@ -357,7 +409,7 @@ and fresh external output paths; placeholders are **not runnable defaults**:
 
 ```bash
 python -B -I -S ci_tools/base_ci.py audit --expected-revision <reviewed-commit> --output <external-audit>
-python -B -I -S ci_tools/base_ci.py all --expected-revision <reviewed-commit> --output <external-full> --timeout 7200
+python -B -I ci_tools/base_ci.py all --expected-revision <reviewed-commit> --output <external-full> --timeout 7200
 python -B scripts/verify_release_ci.py regressions --expected-revision <reviewed-commit> --output <external-bounded>
 python -B scripts/verify_release_ci.py wheel --expected-revision <reviewed-commit> --output <external-wheel>
 python scripts/verify_orca.py --registry <fresh-registry> --output <external-orca-report>

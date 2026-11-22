@@ -1,0 +1,475 @@
+{
+  "schema": "cochem.public-selected-security-progress/1",
+  "scope": "Separate actual producer summaries; no complete-security, full-SRS or student-ready claim",
+  "pip_bootstrap": {
+    "source_revision": "ac404f2353e821890968fd008d701f6f501dd827",
+    "publication": "ordinary nonforce push with exact remote main readback",
+    "four_installer_routes_use_verified_pip": "26.2",
+    "targeted_pytest": {
+      "tests": 13,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "owned_cleanup_empty": true,
+    "accepted_existing_environments_upgraded": false,
+    "original_publication_sha256": "e4029f80ce977b477b862d3d2bcdc9796e37dfed2ffea7cb5ba888808d852764",
+    "original_qualification_sha256": "1f8a9ada0e11c2f23d1be663042e4fcf6d2b2a4285d561db8913737cd6872b00",
+    "original_junit_sha256": "7b93e3f35a512c2fc48b16307e0a714c1ee4a54590fed2848033fe9903a8af2f"
+  },
+  "filelock_tornado_selected": {
+    "source_revision": "061e9db92c310a9ec87a50889aa4501308e9c246",
+    "versions": {
+      "filelock": "4.2.1",
+      "tornado": "6.6"
+    },
+    "initial_direct_pins": 19,
+    "initial_install_pipcheck_and_API_passed": true,
+    "initial_whole_attempt_passed": false,
+    "initial_phase4_pytest_exit": 4,
+    "initial_phase4_collection_errors": 2,
+    "initial_phase4_passed": 0,
+    "initial_failure_reason": "h5py missing from candidate test environment due eager package initializer imports",
+    "actual_API_observations": [
+      "FileLock contention, release and sentinel preservation",
+      "loopback HTTP and WebSocket echo",
+      "same-environment marker-only Jupyter kernel and shutdown",
+      "Jupyter Server and Voila API object construction"
+    ],
+    "separate_additions_only_resume_pytest": {
+      "tests": 3,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "prior_API_checks_repeated": false,
+    "original96_distributions_and_payloads_unchanged": true,
+    "old_accepted_environment_unchanged": true,
+    "resume_owned_cleanup_empty": true,
+    "original_selected_qualification_sha256": "7c3bd2a26d72112fc2220b5330a880398a7d2312cc8e91349f1c9857b4146b71",
+    "original_initial_failure_readback_sha256": "74c1aba378efea63ba74df75dab9ff0a4ace5be30574f965e7bd36f662e6dc05",
+    "original_API_receipt_sha256": "da52ee1f2a3ee23196f64b6c7ad2dc53c0a1635c8e1e318cee746ccdd3618200",
+    "original_resume_receipt_sha256": "81327f8bf42a29180060583d5951d8f0731b4a06b5a5bea05ac04944c14b62a0",
+    "original_resume_owner_sha256": "620314357ac61d001c5e5abac474e68525886a291ec405b155cf7c8657396f70",
+    "original_resume_junit_sha256": "ea16118c541233742da2ab0546c9960f9ba50a333b4f6fdac8018debf2ec039b"
+  },
+  "advisory_boundary": {
+    "source_matched_packages": 7,
+    "source_matched_exact_versions": 10,
+    "source_matched_alias_families": 61,
+    "source_matches_are_not_GitHub_alert_mapping": true,
+    "repository_server_notice_count": 42,
+    "actual_alert_details_status": "Unresolved discrepancy: verified ADMIN GraphQL reports zero open and unfiltered alerts; REST403; last push notice42. No individual alert mapping established.",
+    "prior_pip25_0_1_families_are_separate": 6,
+    "original_static_triage_sha256": "0fbdb847926b61a71498dc60c682debce1777376b9d8d29377df15d94019f14e"
+  },
+  "remaining_limits": [
+    "Existing accepted pip25 environments were not modified by these source updates",
+    "Eight workflow pip bootstrap mutation sites and build frontend internal pip provisioning remain separately unqualified; no all-entry-point remediation claim",
+    "Full ML/transitive resolver/native profile qualification is not established by direct-source inspection or minimal API checks",
+    "No full browser/GUI, hosted deployment, licensed engine, full SRS or student readiness acceptance"
+  ],
+  "five_package_selected": {
+    "state": "SELECTED_RUNTIME_PASS",
+    "proposal_READY_sha256": "082864812dac265d652986d143dcffe28f39de9b74794c3731fc80ec9d4b59e1",
+    "packages": [
+      "certifi",
+      "GitPython",
+      "Pillow",
+      "setuptools",
+      "wheel"
+    ],
+    "actual_runtime_result": true,
+    "qualified_source_revision": "548adbb4ec80a602f152e058dfb4607a229eb9b4",
+    "actual_qualification_receipt_sha256": "a6f80053476f1193c983b14aed3fcb53b5d60c263c872a479bcc158d4a41f608",
+    "versions": {
+      "certifi": "2026.10.18",
+      "GitPython": "3.2.1",
+      "Pillow": "13.0.0",
+      "setuptools": "84.1.0",
+      "wheel": "0.46.2"
+    },
+    "build_pytest": {
+      "tests": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "package_APIs_passed": true,
+    "installed_stdlib_payload_passed": true,
+    "installed_BASE_RECORD_members": 1092,
+    "owned_cleanup_empty": true,
+    "accepted_existing_environments_upgraded": false,
+    "scientific_operations": 0,
+    "original_API_receipt_sha256": "369211d18c776cf53d1847bb7566ff95c4ac9b06c7e572b931c5420981c52f1d",
+    "original_installed_payload_sha256": "5919e0443c83b73c7c0e62722c220ce5c652eca6db5e1e857ca6c61388a6c436",
+    "artifacts": [
+      {
+        "name": "cochem_base-1.1.0-py3-none-any.whl",
+        "bytes": 3154982,
+        "sha256": "1023712788d3965fde196e9c56e45ca8db18eb52555e1ca01b7c0f8024a0002f"
+      },
+      {
+        "name": "cochem_base-1.1.0.tar.gz",
+        "bytes": 12438185,
+        "sha256": "e6d1b367905468c37e6d1977933a68866f90e06562337c022229ff6fb5e11780"
+      }
+    ],
+    "scope": "Bounded package APIs, real BASE build and installed stdlib helper; not complete UI/ML/scientific dependency runtime"
+  },
+  "pip_adapter_selected": {
+    "revision": "499494b6ea7d49a6a53a22a1a73777714c41a262",
+    "passed": true,
+    "scope": "Verified pip context, actual DependencyManager target and subprocess results, actual intake broker streams, original installer controls; no complete ML/intake install/hosted/scientific qualification",
+    "pytest": {
+      "errors": 0,
+      "failures": 0,
+      "skipped": 0,
+      "tests": 24
+    },
+    "new_context_cases": 11,
+    "original_installer_cases": 13,
+    "elapsed_seconds": 78.59242510795593,
+    "owned_boundary_empty": true,
+    "accepted_environment_unchanged": true,
+    "source_audit_passed": true,
+    "infrastructure_members": 232,
+    "prior_a699_source_audit_passed": false,
+    "prior_a699_tests_executed": false,
+    "native_owner_sha256": "eb034e313c977b8e0f60bebb8464ec0b839ad74455220feaa235cd371244c748",
+    "native_worker_sha256": "8b64fbb0864f5c0a43ff5ce74762b6c12db29795d7bac6682f7980d1c7020ee8",
+    "native_junit_sha256": "a38439e471c207aab7eb28ee925241d3ada6214ba0dff327ceac3c9551c1df84",
+    "native_outcomes_sha256": "4ad27a876510f4d2e3fbe99361443d39fa2367bdc11a0408347a05abd5be56e5",
+    "remaining": [
+      "Eight workflow pip bootstrap mutation sites",
+      "Build frontend internal pip provisioning",
+      "Full ML/AIMNet installations and complete application/scientific/hosted acceptance",
+      "Existing accepted pip25 installed metadata remains, while these mutations execute verifiedpip26.2",
+      "GitHub alert discrepancy remains unresolved"
+    ],
+    "original_selected_qualification_sha256": "3ee409137aa08e83a2afdd6a758a61b3f995df20e44ac5ec5afb58fdb0f1a80f"
+  },
+  "ac404_hosted_ci": {
+    "prior_platform_controls": {
+      "failed_per_platform": 0,
+      "installed_wheel_checks_passed_each": true,
+      "original_readback_sha256": "ba2b5d6c8a49ed2869de2ce6e67c90085ae5c76acae9045e3b64d09015b22758",
+      "passed_per_platform": 241,
+      "platforms": [
+        "Linux",
+        "macOS",
+        "Windows"
+      ],
+      "skipped_per_platform": 0
+    },
+    "regression": {
+      "original_acceptance_sha256": "a635bef5d3cc85771fcdfa624093676f0ee520f8d96be247197fbe01d99da2f0",
+      "parent_failed": 5,
+      "parent_passed": 2376,
+      "passed": false,
+      "release_accepted": false,
+      "separate_subtests_passed": 34,
+      "skipped": 0
+    },
+    "run_id": 41249233171,
+    "run_url": "https://github.com/ProfJJK-CoChem/CoChem-BASE/actions/runs/41249233171",
+    "scope": "Distinct controls on ac404; platform passes do not override regression failure or skipped dashboard step",
+    "source_revision": "ac404f2353e821890968fd008d701f6f501dd827",
+    "dashboard_step": {
+      "acceptance_established": false,
+      "status": "SKIPPED",
+      "scope": "Skipped step within the bounded regression job; not a separate dashboard job"
+    }
+  },
+  "ac404_free_engine_artifact": {
+    "archive_sha256": "f168cd9d9e9c36f56781a118bb124a4b81bcfd40f15a2774b3fcdc5d78b7740b",
+    "artifact_id": 13062077334,
+    "methods": [
+      "xTB GFN-FF",
+      "xTB GFN2-xTB",
+      "PySCF HF/STO-3G",
+      "PySCF PBE-D4/def2-SVP",
+      "PySCF B3LYP-D4/def2-TZVP"
+    ],
+    "original_manifest_sha256": "2c34985e09051dfb16ce80d66c881bc1aa098631b6f3aea15d4ab24093567e93",
+    "original_member_bytes_rehashed": true,
+    "original_verification_sha256": "f2dd47bf52abd085a5c83386fe51821c5d212efbadb60e1b09c517bf52cd7e61",
+    "retained_members": 23,
+    "scope": "Bounded public maintainer controls, not minimum/accuracy/licensed/student acceptance; raw input/output stays outside this documentary projection",
+    "source_revision": "ac404f2353e821890968fd008d701f6f501dd827",
+    "verified_engine_statuses": {
+      "pyscf": "passed",
+      "xtb": "passed"
+    }
+  },
+  "fresh_ui_bootstrap": {
+    "elapsed_seconds": 107.45395302772522,
+    "independent_root_readback_sha256": "222eaed6db9197860e1ad1a622a7f99b49172007cedafa104e59b72b6e9720cb",
+    "independent_root_readback_status": "COMPLETED",
+    "old_ui_unchanged": true,
+    "original_epoch_receipt_sha256": "efa4a49465c400099431c5458cf820e3650f385635f4cc1f9a0484c55f88a2d1",
+    "original_origins_final_sha256": "66b2be80b6103feb03561cbac0d38751add187bfcd384c393d2e671992372467",
+    "original_terminal_sha256": "96a2af87b35430ac6d7ebde8898fe4420f89be2c66b98d3e36cc103b61eceaa0",
+    "owned_boundary_empty": true,
+    "passed": true,
+    "pip_check_passed": true,
+    "protected_files_and_controller_unchanged": true,
+    "readiness_after": true,
+    "retained_originals_manifest_sha256": "af6183ea933ccb4bb650cad8c03815c21b73cf71a924ebae4192f891f2fd4399",
+    "scope": "Fresh UI-only dependency epoch; no service/browser/native/scientific/student acceptance",
+    "source_authority_errors": 0,
+    "source_origin_failures": 0,
+    "source_origin_records": 20,
+    "source_revision": "f90e2629dffaf57fc19d71239df0583fd31eb991",
+    "startup_only_records": 0
+  },
+  "release_followups": {
+    "five_repaired_ci_cases": {
+      "actual_counts": {
+        "errors": 0,
+        "failures": 0,
+        "passed": 5,
+        "skipped": 0
+      },
+      "manifest_sha256": "f22d505e4926bb82c540a747df332ebfde8237c2e73af0b67c19dff9c33e822d",
+      "original_junit_sha256": "d9ded5cec0b850501b72a2cf413ba57e820466d29397af05d8e85dc7a9fedcf3",
+      "scope": "Only the five existing regressions that failed CIac404; original full CI remains failure; browser/science not covered",
+      "source_origin_records": 8,
+      "source_revision": "e1e1a56ebd5248b8cf6ca72e08fe188be72dc68d",
+      "state": "SELECTED_PASS",
+      "worker_receipt_sha256": "3adf74e2cf8dfe9a43c55d6237b9382252f27ac5aba860759d73b813f36e7e79"
+    },
+    "fresh_browser": {
+      "actual_result": "PASSED_LOCAL_OBSERVATION",
+      "receipt_sha256": "6acfd74fffe78bfce4555bf008e7184c5148edddd595cd5de514191ffb09c028",
+      "source_revision": "d8fc75842f23b166b40e04ffedbd62b8258c02ad",
+      "dependency_epoch_revision": "f90e2629dffaf57fc19d71239df0583fd31eb991",
+      "state": "COMPLETED",
+      "elapsed_seconds": 46.91667837500063,
+      "screenshots": 5,
+      "downloads": [
+        {
+          "sha256": "b72658f4f5610d21229be83259d29bb62f07ac808a4c895f550b6620bdb58dfb",
+          "bytes": 27498
+        },
+        {
+          "sha256": "cdd816db59a411d1f680b4d6fccaf02b4b4e9c1a5bf5a7814ec36412a251d793",
+          "bytes": 414012
+        }
+      ],
+      "comparison_csv_sha256": "b65348f3f9ed350e019c1e9804a8a396d65479dda6d4117becb4f3e1587bbdf7",
+      "original_files_preserved": 607,
+      "source_origin_records": 79,
+      "startup_only_records": 1,
+      "source_origin_errors": 0,
+      "all18_actual_reply_pairs": true,
+      "new_chemistry_requests": 0,
+      "owned_boundary_empty": true,
+      "assignment_restored": true,
+      "original_attempt1": "FAILED_OBSERVER_NAVIGATION; preserved separately",
+      "scope": "Actual local browser navigation, retained results/download/help/optional engine absence; zero new chemistry/hosted authorization; no full student/SRS/human-comprehension claim",
+      "source_origin_record_scope": "79 lifecycle events: 40 initial and 39 final; one service launcher has only a startup record",
+      "full_release_accepted": false
+    },
+    "no_complete_release_or_student_readiness_claim": true
+  },
+  "published_source_followup": {
+    "source_revision": "e1e1a56ebd5248b8cf6ca72e08fe188be72dc68d",
+    "ordinary_forward_push_and_remote_readback": true,
+    "publication_receipt_sha256": "bbb7ceff4d38a29527772d56e3f3d11186485eedc699b6dfbefc1866413980b0",
+    "full_ci": {
+      "run_id": 41254729978,
+      "state": "IN_PROGRESS_AT_ROOT_READBACK",
+      "outcome": null
+    },
+    "dependency_graph": {
+      "run_id": 41254731772,
+      "state": "IN_PROGRESS_AT_ROOT_READBACK",
+      "outcome": null
+    },
+    "server_notice_count": 42,
+    "notice_is_not_individual_alert_mapping": true,
+    "browser_pending": true,
+    "scope": "Historical e1 publication readback; later d8f platform and browser outcomes are recorded separately"
+  },
+  "windows_bootstrap_followup": {
+    "source_revision": "d8fc75842f23b166b40e04ffedbd62b8258c02ad",
+    "publication_receipt_sha256": "47c0c05ac878567a16b2c89cfa290e409361da94ddf4329d35e042f8b34600ae",
+    "original_e1_windows_job": 124695475265,
+    "original_e1_windows_status": "FAILURE",
+    "failure_manifest_sha256": "e85058898d64163791d18e8001ccea68354f5b6ba0b7bed65d6875517becd09a",
+    "fix": "Bootstrap the exact verified pip wheel using isolated module execution; Windows protection remains enabled",
+    "linux_selected_installer_cases": {
+      "passed": 24,
+      "failed": 0,
+      "skipped": 0,
+      "manifest_sha256": "68198312f11239487faa6146b0a9feca14784f230882a4c974569840908fdd00"
+    },
+    "hosted_run": 41255280345,
+    "completed_jobs_readback_sha256": "bc1be5eece42cd0e2958c071c21075f5d74bfd9e7756c4e5507d53c9d757e23a",
+    "completed_artifacts": [
+      {
+        "name": "base-source-evidence",
+        "artifact_id": 13063010220,
+        "archive_bytes": 12354,
+        "archive_sha256": "cd606edc9d4bf930300f0464e1594014a7ef1af05cf26838074a8acc55039d82"
+      },
+      {
+        "name": "ci-controls-ubuntu-24.04",
+        "artifact_id": 13062895648,
+        "archive_bytes": 738286,
+        "archive_sha256": "b95cd28a4cf159326909cea1f32a92d674ae3fc531d16184a53a6e53e2e199bc",
+        "junit": [
+          {
+            "name": "pytest",
+            "errors": "0",
+            "failures": "0",
+            "skipped": "0",
+            "tests": "241",
+            "time": "44.513",
+            "timestamp": "2026-11-01T00:08:03.511975+00:00"
+          }
+        ]
+      },
+      {
+        "name": "ci-controls-windows-latest",
+        "artifact_id": 13062865865,
+        "archive_bytes": 733237,
+        "archive_sha256": "f21d9c34268b3bcfc580e92794e5380eceed2c407cef106f5898a5ee7e8aaed5",
+        "junit": [
+          {
+            "name": "pytest",
+            "errors": "0",
+            "failures": "0",
+            "skipped": "0",
+            "tests": "241",
+            "time": "98.289",
+            "timestamp": "2026-11-01T00:08:20.408842+00:00"
+          }
+        ]
+      },
+      {
+        "name": "installed-wheel-macos-latest",
+        "artifact_id": 13062773425,
+        "archive_bytes": 15583865,
+        "archive_sha256": "4ca6d4c7b505a6451e86765b6a0fadb69e8964de131a87be2531eac981daf936",
+        "acceptance": {
+          "passed": true,
+          "source_revision": "d8fc75842f23b166b40e04ffedbd62b8258c02ad",
+          "scope": "Clean wheel installation, CLI, isotope database and actual dry-run deck; no chemistry execution"
+        }
+      },
+      {
+        "name": "ci-controls-macos-latest",
+        "artifact_id": 13062733875,
+        "archive_bytes": 739513,
+        "archive_sha256": "ea5dbe96e84e90960409adb2118b006bdcb5139f66e4f3bbec149e4ed6af413e",
+        "junit": [
+          {
+            "name": "pytest",
+            "errors": "0",
+            "failures": "0",
+            "skipped": "0",
+            "tests": "241",
+            "time": "33.582",
+            "timestamp": "2026-11-01T00:07:47.049453+00:00"
+          }
+        ]
+      },
+      {
+        "name": "installed-wheel-ubuntu-24.04",
+        "artifact_id": 13062629477,
+        "archive_bytes": 15582924,
+        "archive_sha256": "026cd2d4f26e981f37a1be164c4ae48210e4ceb9c2925505cb3c66bc8d82a502",
+        "acceptance": {
+          "passed": true,
+          "source_revision": "d8fc75842f23b166b40e04ffedbd62b8258c02ad",
+          "scope": "Clean wheel installation, CLI, isotope database and actual dry-run deck; no chemistry execution"
+        }
+      },
+      {
+        "name": "installed-wheel-windows-latest",
+        "artifact_id": 13062044688,
+        "archive_bytes": 15579196,
+        "archive_sha256": "f11e1cc95bd720ecc5111b50a2b11fa3654bd8bf28385118d7fb9ee8bbdb78c1",
+        "acceptance": {
+          "passed": true,
+          "source_revision": "d8fc75842f23b166b40e04ffedbd62b8258c02ad",
+          "scope": "Clean wheel installation, CLI, isotope database and actual dry-run deck; no chemistry execution"
+        }
+      }
+    ],
+    "full_regression_status": "IN_PROGRESS_AT_READBACK; not a pass"
+  },
+  "fresh_ui_public_advisory_readback": {
+    "actual_distributions": 153,
+    "third_party_exact_version_snapshots": 152,
+    "reused_october31_snapshots": 133,
+    "fresh_november1_http200_responses": 19,
+    "fetch_errors": 0,
+    "reported_advisory_records": 0,
+    "local_base_unassessed": true,
+    "original_results_sha256": "0fff595815858ea8e0ab78527c4d8a41d56941405443aacb9efcc5d80000a07e",
+    "ready_sha256": "a061f116cd2428eabe4c9d1d4ee9776ea9ad98689e4db6ce3ff474e32b8b3c55",
+    "limits": [
+      "Empty public metadata is not security clearance",
+      "Retained snapshot dates differ from fresh response dates",
+      "GitHub 42 alert identities remain inaccessible/unmapped",
+      "No installed environment was modified by this readback"
+    ]
+  },
+  "d8f_final_bounded_workflow_readback": {
+    "source_revision": "d8fc75842f23b166b40e04ffedbd62b8258c02ad",
+    "run_id": 41255280345,
+    "workflow_conclusion": "success",
+    "completion_utc": "2026-11-01T00:48:19Z",
+    "bounded_acceptance": {
+      "passed": true,
+      "release_accepted": true,
+      "parent_passed": 2392,
+      "parent_collected": 2392,
+      "failed": 0,
+      "skipped": 0,
+      "separate_subtests_passed": 34,
+      "original_acceptance_sha256": "375eed69a5830bc242b5fd3fff908180d8e7ab13264f27ed22a518a250c8cf31",
+      "owned_boundary_empty": true,
+      "original_junit_sha256": "44578581c86bfc183c439a7ffca2d3565f47b5896fb64d5d154f19d7051a28c1"
+    },
+    "rendered_dashboard_lifecycle_step": "success",
+    "optional_native_lifetime_tracing": {
+      "job_id": 124697188486,
+      "conclusion": "skipped",
+      "execution_established": false
+    },
+    "source_lifecycle_events": {
+      "total": 977,
+      "initial": 509,
+      "final": 468,
+      "startup_only_observations": 41,
+      "reported_source_failures": 0,
+      "reported_authority_errors": 0,
+      "all_process_finalizers_observed": false
+    },
+    "setup_validation_status": "DEGRADED_OPERATIONAL",
+    "optional_engine_GPU_readiness_established": false,
+    "original_final_artifact": {
+      "artifact_id": 13063929119,
+      "bytes": 2705452,
+      "sha256": "7b14834bdf8fd6bb4229573a3aa41a4f83773cedb333e7a84453939ea23de43f"
+    },
+    "independent_artifact_readback_sha256": "cab353df443d82f3b905b7ac0161fe320e29b9934c9d56684bb52491ec597c55",
+    "scope": "Bounded hosted workflow; no full SRS/security/licensed/student identity or Codespace acceptance",
+    "native_calculations": {
+      "methods": [
+        "xTB GFN-FF water",
+        "xTB GFN2-xTB water",
+        "PySCF HF/STO-3G water",
+        "PySCF PBE-D4/def2-SVP water",
+        "PySCF B3LYP-D4/def2-TZVP water"
+      ],
+      "original_logs_matched": true,
+      "original_verification_sha256": "22019f91125fa12930b8df7497a3211218e9581139d33b7f37222aac5fcc6ba2",
+      "scope": "Converged bounded water calculations; no general accuracy or all-engine qualification"
+    }
+  }
+}

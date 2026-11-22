@@ -1,14 +1,14 @@
 include LICENSE README.md CHANGELOG.md pyproject.toml cli.py
 include .gitattributes .gitignore
+include .cochem/student-actions-admission.json
 include Start_Here.ipynb Launch_CoChem_Mac.command Launch_CoChem_Mac_Linux.sh Launch_CoChem_Windows.bat
 include requirements*.txt pytest.ini pytest-srs.ini .env.example
 include Method_Matrix.md CoChem_User_Manual.md
 graft src
 graft cochem
-graft cochem_topos
 graft frontend
 graft ui
-graft Libraries
+prune Libraries
 graft scripts
 graft ci_tools
 graft examples
@@ -21,3 +21,8 @@ global-exclude __pycache__ *.py[cod] .DS_Store
 prune artifacts
 prune build
 prune dist
+prune cochem_topos
+prune src/cochem_torq
+prune cochem/topos
+prune src/cochem/topos
+prune cochem/torq

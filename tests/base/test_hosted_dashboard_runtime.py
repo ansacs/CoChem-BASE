@@ -110,6 +110,47 @@ def test_identity_requires_exact_command_and_reports_creation_time():
         process.wait(timeout=5)
 
 
+def test_failed_restart_preflight_preserves_server_receipt_and_unrelated_listener(tmp_path):
+    """An invalid target must fail before even stale service state is changed."""
+    from urllib.request import ProxyHandler, build_opener
+
+    import psutil
+
+    from scripts.hosted_dashboard import server_command
+
+    runtime_environment(tmp_path)
+    code = """from http.server import BaseHTTPRequestHandler,HTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b'preserved listener')
+    def log_message(self,*args):
+        pass
+server=HTTPServer(('127.0.0.1',0),Handler)
+print(server.server_port,flush=True)
+server.serve_forever()
+"""
+    listener = subprocess.Popen([sys.executable, "-u", "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        port = int(listener.stdout.readline())
+        receipt = tmp_path / "dashboard/server.json"
+        receipt.write_text(json.dumps({"pid": listener.pid, "port": port,
+            "create_time": psutil.Process(listener.pid).create_time(),
+            "command": server_command(Path(sys.executable), port)}))
+        before = receipt.read_bytes()
+        result = subprocess.run([sys.executable, str(REPO_ROOT / "scripts/hosted_dashboard.py"),
+            "restart", "--artifacts", str(tmp_path), "--venv", str(Path(sys.executable).parent.parent),
+            "--port", str(port)], capture_output=True, text=True, timeout=30)
+        assert result.returncode != 0
+        assert receipt.is_file(), "Failed target preflight removed the previous server receipt"
+        assert receipt.read_bytes() == before
+        assert listener.poll() is None
+        with build_opener(ProxyHandler({})).open(f"http://127.0.0.1:{port}/", timeout=5) as response:
+            assert response.read() == b"preserved listener"
+    finally:
+        listener.terminate()
+        listener.wait(timeout=5)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Checks the Linux Codespaces session boundary")
 @pytest.mark.parametrize("parent_exits", [False, True])
 def test_failed_server_cleanup_stops_its_group_and_preserves_unrelated_process(tmp_path, parent_exits):
@@ -143,3 +184,24 @@ def test_failed_server_cleanup_stops_its_group_and_preserves_unrelated_process(t
         stop_owned_server(server)
         unrelated.terminate()
         unrelated.wait(timeout=5)
+
+
+def test_setup_status_server_serves_http_200_progress_and_releases_port(tmp_path):
+    from urllib.request import ProxyHandler, build_opener
+
+    from scripts.hosted_dashboard import _setup_status_server, _write_setup_progress, page_ready
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    _write_setup_progress(tmp_path, "Step 3/5: Preparing PAW pseudopotentials and free engines (xTB, CREST)...")
+    with _setup_status_server(tmp_path, port):
+        assert not page_ready(port)
+        with build_opener(ProxyHandler({})).open(f"http://127.0.0.1:{port}/", timeout=5) as response:
+            body = response.read().decode("utf-8")
+            assert response.status == 200
+            assert "CoChem-BASE is preparing your workspace" in body
+            assert "Step 3/5" in body
+    with socket.socket() as rebound:
+        rebound.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rebound.bind(("127.0.0.1", port))
